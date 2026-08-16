@@ -164,6 +164,18 @@ SHA-256. The packaged shell defaults to the `https://gh-proxy.com/` mirror
 for networks where GitHub releases stall; override with
 `DSH_RUNTIME_MIRRORS` (comma-separated prefixes).
 
+## App self-update (in-app online updates)
+
+The installer ships with [electron-updater](https://github.com/electron-userland/electron-builder/tree/master/packages/electron-updater) wired to the GitHub Releases source declared in `build.publish` (`yxx-jf/deepseek-harness-desktop`). The tray action "检查更新…" and a silent startup check look for a newer installer; a found update downloads and installs on restart (`src/updater.ts`). This is separate from the runtime bootstrap, which still swaps the runtime on every launch.
+
+Publishing an app update uploads the installer update triple — the `.exe`, `latest.yml`, and the `.exe.blockmap` (all produced by electron-builder) — to the same release:
+
+```sh
+gh release create v0.1.0-rc.6 apps/desktop/dist/DeepSeek-Harness-*.exe apps/desktop/dist/latest.yml apps/desktop/dist/DeepSeek-Harness-*.exe.blockmap -R yxx-jf/deepseek-harness-desktop
+```
+
+**Version channel rule**: electron-updater updates within the same prerelease channel only — an app built as `0.1.0-rc.5` detects newer `*-rc.*` releases but ignores stable ones. Point customers at stable version numbers (`0.1.0`, `0.2.0`, …) so they track every future release.
+
 ## Updating after an upstream pull
 
 ```sh

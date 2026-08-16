@@ -81,6 +81,18 @@ pnpm run publish:runtime --url https://cdn.example.com/dsh --write-config
 
 下载对发布 CDN 的不稳定链路有韧性：某次尝试在 `downloadStallTimeoutMs`（20s）内没有字节到达，或在整体 `downloadTimeoutMs` 超时后会被中断，每个 URL 按 `downloadRetries` 重试，然后依次尝试 `mirrorPrefixes` 镜像前缀，每次尝试都由 manifest 的 SHA-256 把关。打包壳层默认使用 `https://gh-proxy.com/` 镜像应对 GitHub release 卡住的情况；可用 `DSH_RUNTIME_MIRRORS`（逗号分隔的前缀）覆盖。
 
+## 应用自更新（应用内在线更新）
+
+安装包内置 [electron-updater](https://github.com/electron-userland/electron-builder/tree/master/packages/electron-updater)，指向 `build.publish` 声明的 GitHub Releases 源（`yxx-jf/deepseek-harness-desktop`）。托盘"检查更新…"与启动静默检查会寻找更新的安装包；发现更新后下载并在重启时安装（`src/updater.ts`）。这与运行时引导相互独立，运行时仍会在每次启动时自动替换。
+
+发布应用更新需要把安装包更新三件套——`.exe`、`latest.yml`、`.exe.blockmap`（均由 electron-builder 生成）——上传到同一个 release：
+
+```sh
+gh release create v0.1.0-rc.6 apps/desktop/dist/DeepSeek-Harness-*.exe apps/desktop/dist/latest.yml apps/desktop/dist/DeepSeek-Harness-*.exe.blockmap -R yxx-jf/deepseek-harness-desktop
+```
+
+**版本通道规则**：electron-updater 只在同一预发布通道内更新——构建为 `0.1.0-rc.5` 的应用只会检测更新的 `*-rc.*`，忽略稳定版。面向客户请使用稳定版本号（`0.1.0`、`0.2.0`、…），以便跟踪所有后续发布。
+
 ## 上游拉取后的更新
 
 ```sh

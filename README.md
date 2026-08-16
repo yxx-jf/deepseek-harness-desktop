@@ -1,57 +1,68 @@
-# DeepSeek Harness
+# DeepSeek Harness Desktop
 
 English | [中文](README.zh.md)
 
-DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
+A desktop solution for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin ecosystem: bring the official Web UI into a native desktop window, with one-click install, system tray, two-step setup, and online updates.
 
-It uses an architecture where **everything is a plugin**, and is powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper).
+## Download
 
-## Developer preview
+- **Windows**: [Download the latest installer](https://github.com/yxx-jf/deepseek-harness-desktop/releases/latest)
+- macOS: coming soon
 
-DeepSeek Harness is currently in _developer preview_ and is iterating rapidly. **THERE WILL BE COMPATIBILITY-BREAKING CHANGES.**
+![Preview](assets/desktop-preview.png)
 
-## Run
+## Features
 
-### Run from `npm`
+| Feature | Description |
+| --- | --- |
+| Desktop shell | Brings the official DSH Web UI into a native window; no Node.js or shell commands needed |
+| Two-step install | A small installer lands first; the runtime downloads on first launch |
+| Runtime auto-update | Checks the remote runtime on every launch and swaps in newer versions silently |
+| In-app upgrade | Checks GitHub Releases for the latest installer, downloads and upgrades on restart |
+| System tray | Tray-resident, one-click show/hide of the main window |
 
-Install `Node.js`, then run:
+## Online updates
 
-```sh
-npx @deepseek-ai/dsh web
-```
+Two update layers keep the app current:
 
-The command starts the Web UI, served at `http://127.0.0.1:3080` by default. See [Web UI guide](docs/user/guide/index.md).
+1. **Runtime updates**: on launch, compare the remote `runtime-manifest.json`; download and atomically swap a newer runtime without reinstalling.
+2. **App updates**: check GitHub Releases for the latest installer, download and install in one click.
 
-### Run from source
+## Relationship to the official project
 
-To run from a repository checkout:
+This project is built on [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness).
 
-```sh
-git clone https://github.com/deepseek-ai/deepseek-harness.git
-cd deepseek-harness
-pnpm install
-pnpm run build
-pnpm dsh web
-```
+The official project provides the core agent capabilities, the plugin system, and the Web UI. This project is responsible for:
 
-## Community and support
+- Desktop application packaging
+- Starting, stopping, and restoring the local service
+- Desktop window and system tray integration
+- Windows installer build and release
+- A UI better suited to the desktop
 
-- Feel free to submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).
-- Add the [`dsh-plugin`](https://github.com/topics/dsh-plugin) topic to your plugin repository for discoverability.
-- Join <a href="https://discord.gg/Ycq5dCaS4">DeepSeek Harness Discord community</a>.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+> This is a community desktop build, not an official DeepSeek product. To run Harness from the command line, prefer the [official repository](https://github.com/deepseek-ai/deepseek-harness).
 
 ## Development
 
-Start with the [development guide](docs/development.md) and [architecture documentation](docs/architecture.md).
+Sync the latest upstream and repackage:
 
-For agents, follow [AGENTS.md](AGENTS.md).
+```sh
+git fetch origin && git merge origin/master
+pnpm install
+pnpm run build
+pnpm --filter @deepseek-ai/dsh-desktop run dist:win:fast
+```
+
+The desktop shell lives in `apps/desktop/`. Publish the runtime with:
+
+```sh
+pnpm --filter @deepseek-ai/dsh-desktop run publish:runtime --url <base> --write-config
+```
+
+See [apps/desktop/README.md](apps/desktop/README.md).
 
 ## License
 
 [MIT](LICENSE)
 
-Third-party dependencies and their licenses are disclosed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+This project is fully open source and free. If anyone tries to sell it to you, decline.
