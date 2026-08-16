@@ -17,7 +17,7 @@ import {
   type Event,
   type MenuItemConstructorOptions,
 } from 'electron'
-import { ensureRuntime, extractZip } from './runtime-bootstrap.ts'
+import { ensureRuntime, extractZip, fetchRuntimeManifest, readInstalledVersion } from './runtime-bootstrap.ts'
 import { extractZipParallel } from './parallel-extract.ts'
 import { createSplashWindow, type SplashSurface } from './splash.ts'
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
@@ -103,55 +103,43 @@ function splashHtmlPath(): string {
  * manifest URL is configured, in which case the runtime is bootstrapped into
  * the user data directory first (showing a splash while it downloads).
  */
-async function resolveHostPaths(): Promise<HostPaths> {
+async function resolveHostPaths(splash: SplashSurface | undefined): Promise<HostPaths> {
   if (!app.isPackaged) return hostPaths(REPOSITORY_ROOT)
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return hostPaths(join(process.resourcesPath, 'host'))
   const runtimeDir = join(app.getPath('userData'), 'host')
-  let splash: SplashSurface | undefined
-  try {
-    const outcome = await ensureRuntime({
-      manifestUrl,
-      runtimeDir,
-      hostEntry: HOST_ENTRY,
-      // Chromium's network stack (Electron net.fetch) validates certificates
-      // against the OS store and honors system proxy settings. Node's bundled
-      // CA fetch rejects machines with locally installed roots (intercepting
-      // proxies, security suites), so the runtime download must not use it.
-      fetch: (input, init) => net.fetch(String(input), init),
-      // Flaky links to release CDNs stall mid-stream; abort a stalled attempt
-      // and retry, then fall back to mirror prefixes that prepend to the
-      // archive URL (the manifest SHA-256 gates every attempt).
-      downloadStallTimeoutMs: 20_000,
-      downloadRetries: 1,
-      mirrorPrefixes: (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
-        .split(',')
-        .map(mirror => mirror.trim())
-        .filter(mirror => mirror.length > 0),
-      // Parallel workers inflate and write concurrently; the serial path is
-      // the fallback for archives or environments the parallel path cannot
-      // handle (the serial extractor re-creates the destination first).
-      extractArchive: async (archivePath, destination, onBytes) => {
-        try {
-          await extractZipParallel(archivePath, destination, onBytes)
-        } catch (error) {
-          console.warn('desktop parallel extraction failed; falling back to serial:', error)
-          await extractZip(archivePath, destination, onBytes)
-        }
-      },
-      onProgress: (progress) => {
-        // Only surface a window once a real download starts, so an up-to-date
-        // runtime never flashes a splash.
-        if (progress.phase === 'downloading' && splash === undefined) {
-          splash = createSplashWindow(splashHtmlPath())
-        }
-        splash?.update(progress)
-      },
-    })
-    return hostPaths(outcome.runtimeDir)
-  } finally {
-    splash?.close()
-  }
+  const outcome = await ensureRuntime({
+    manifestUrl,
+    runtimeDir,
+    hostEntry: HOST_ENTRY,
+    // Chromium's network stack (Electron net.fetch) validates certificates
+    // against the OS store and honors system proxy settings. Node's bundled
+    // CA fetch rejects machines with locally installed roots (intercepting
+    // proxies, security suites), so the runtime download must not use it.
+    fetch: (input, init) => net.fetch(String(input), init),
+    // Flaky links to release CDNs stall mid-stream; abort a stalled attempt
+    // and retry, then fall back to mirror prefixes that prepend to the
+    // archive URL (the manifest SHA-256 gates every attempt).
+    downloadStallTimeoutMs: 20_000,
+    downloadRetries: 1,
+    mirrorPrefixes: (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
+      .split(',')
+      .map(mirror => mirror.trim())
+      .filter(mirror => mirror.length > 0),
+    // Parallel workers inflate and write concurrently; the serial path is
+    // the fallback for archives or environments the parallel path cannot
+    // handle (the serial extractor re-creates the destination first).
+    extractArchive: async (archivePath, destination, onBytes) => {
+      try {
+        await extractZipParallel(archivePath, destination, onBytes)
+      } catch (error) {
+        console.warn('desktop parallel extraction failed; falling back to serial:', error)
+        await extractZip(archivePath, destination, onBytes)
+      }
+    },
+    onProgress: (progress) => { splash?.update(progress) },
+  })
+  return hostPaths(outcome.runtimeDir)
 }
 
 function assertHostArtifacts(paths: HostPaths): void {
@@ -252,7 +240,7 @@ function createTray(): void {
   tray.setToolTip(APP_NAME)
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
-    { label: '检查更新…', click: () => { checkForUpdates(true) } },
+    { label: '检查更新…', click: () => { checkForUpdates(true); void checkRuntimeForUpdates() } },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },
   ]
@@ -281,50 +269,88 @@ function requestAppQuit(): Promise<void> {
 
 async function boot(): Promise<void> {
   if (bootQuitPromise !== undefined) return
-  const paths = await resolveHostPaths()
-  assertHostArtifacts(paths)
-  host = createHostSupervisor({
-    spawnHost: () => spawnDshWeb({
-      ...paths,
-      env: {
-        ...process.env,
-        DSH_DESKTOP: '1',
-      },
-    }),
-    log: chunk => process.stderr.write(chunk),
-    onUnexpectedExit: ({ code, signal }) => {
-      console.error(`desktop Host exited unexpectedly (code ${String(code)}, signal ${String(signal)})`)
-      void requestAppQuit()
-    },
-  })
-  hostOrigin = await host.start()
-  hardenSession()
-  lifecycle = createDesktopLifecycle({
+  // The splash doubles as the startup surface: it renders runtime bootstrap
+  // progress and announces app-update detection, so an update is offered from
+  // the very first frame instead of after the main window settles.
+  const splash = createSplashWindow(splashHtmlPath())
+  setupAutoUpdater({
     getWindow: () => mainWindow,
-    createWindow: createMainWindow,
-    disposeHost: async () => { await host?.shutdown() },
-    quit: releaseAppQuit,
-    reportError: (error) => { console.error('desktop shutdown failed:', error) },
+    onUpdateMessage: (message) => { splash.setMessage(message) },
   })
-  createTray()
-  // App self-update is separate from the runtime bootstrap: wire the updater
-  // and check silently shortly after startup; the tray action reports "up to
-  // date" explicitly.
-  setupAutoUpdater({ getWindow: () => mainWindow })
-  setTimeout(() => { checkForUpdates(false) }, 15_000)
-  // Quit ourselves as soon as the NSIS installer starts: the installer cannot
-  // always force-kill a running app (an elevated app, or one shielded by
-  // security software), while quitting from inside the process needs no kill
-  // rights and also guarantees a clean Host shutdown.
-  if (app.isPackaged && process.platform === 'win32') {
-    installerWatch = createInstallerWatch({
-      isInstallerRunning,
-      intervalMs: INSTALLER_POLL_INTERVAL_MS,
-      onInstallerDetected: () => { void requestAppQuit() },
+  // Check for an app update immediately rather than after a startup delay. The
+  // updater downloads on its own and installs automatically while the splash
+  // is still up, before any user work exists to lose.
+  checkForUpdates(false)
+  try {
+    const paths = await resolveHostPaths(splash)
+    assertHostArtifacts(paths)
+    host = createHostSupervisor({
+      spawnHost: () => spawnDshWeb({
+        ...paths,
+        env: {
+          ...process.env,
+          DSH_DESKTOP: '1',
+        },
+      }),
+      log: chunk => process.stderr.write(chunk),
+      onUnexpectedExit: ({ code, signal }) => {
+        console.error(`desktop Host exited unexpectedly (code ${String(code)}, signal ${String(signal)})`)
+        void requestAppQuit()
+      },
     })
-    installerWatch.start()
+    hostOrigin = await host.start()
+    hardenSession()
+    lifecycle = createDesktopLifecycle({
+      getWindow: () => mainWindow,
+      createWindow: createMainWindow,
+      disposeHost: async () => { await host?.shutdown() },
+      quit: releaseAppQuit,
+      reportError: (error) => { console.error('desktop shutdown failed:', error) },
+    })
+    createTray()
+    // Quit ourselves as soon as the NSIS installer starts: the installer cannot
+    // always force-kill a running app (an elevated app, or one shielded by
+    // security software), while quitting from inside the process needs no kill
+    // rights and also guarantees a clean Host shutdown.
+    if (app.isPackaged && process.platform === 'win32') {
+      installerWatch = createInstallerWatch({
+        isInstallerRunning,
+        intervalMs: INSTALLER_POLL_INTERVAL_MS,
+        onInstallerDetected: () => { void requestAppQuit() },
+      })
+      installerWatch.start()
+    }
+    await lifecycle.showWindow()
+  } finally {
+    splash.close()
   }
-  await lifecycle.showWindow()
+}
+
+/** Offer a restart when a newer remote runtime is published. */
+async function checkRuntimeForUpdates(): Promise<void> {
+  const manifestUrl = packagedManifestUrl()
+  if (manifestUrl === undefined) return
+  const runtimeDir = join(app.getPath('userData'), 'host')
+  try {
+    const manifest = await fetchRuntimeManifest(manifestUrl, (input, init) => net.fetch(String(input), init))
+    const installed = await readInstalledVersion(runtimeDir, HOST_ENTRY)
+    if (installed === manifest.version) return
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      title: '发现新的运行环境',
+      message: `发现新的运行环境 ${manifest.version}，重启应用后将自动下载更新。`,
+      detail: `当前版本：${installed ?? '未知'}。`,
+      buttons: ['立即重启', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    if (response === 0) {
+      app.relaunch()
+      void requestAppQuit()
+    }
+  } catch (error) {
+    console.error('desktop runtime update check failed:', error)
+  }
 }
 
 if (!app.requestSingleInstanceLock()) {

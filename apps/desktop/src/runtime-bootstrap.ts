@@ -131,8 +131,13 @@ export async function readInstalledVersion(runtimeDir: string, hostEntry: string
   }
 }
 
-/** Fetch and validate the runtime manifest. */
-async function fetchManifest(fetchImpl: typeof fetch, url: string): Promise<RuntimeManifest> {
+/**
+ * Fetch and validate the runtime manifest.
+ * @param url - Manifest URL served beside the downloadable runtime archive.
+ * @param fetchImpl - HTTP client; defaults to the global fetch.
+ * @returns The validated runtime manifest.
+ */
+export async function fetchRuntimeManifest(url: string, fetchImpl: typeof fetch = fetch): Promise<RuntimeManifest> {
   const response = await fetchImpl(url, { redirect: 'follow' })
   if (!response.ok) {
     throw new Error(`runtime manifest fetch failed: HTTP ${response.status} for ${url}`)
@@ -321,7 +326,7 @@ export async function ensureRuntime(options: RuntimeBootstrapOptions): Promise<B
   const report = (progress: BootstrapProgress): void => options.onProgress?.(progress)
 
   report(progressOf('fetching-manifest'))
-  const manifest = await fetchManifest(fetchImpl, options.manifestUrl)
+  const manifest = await fetchRuntimeManifest(options.manifestUrl, fetchImpl)
 
   const installed = await readInstalledVersion(options.runtimeDir, options.hostEntry)
   if (installed === manifest.version) {

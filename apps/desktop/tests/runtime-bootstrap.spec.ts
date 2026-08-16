@@ -11,6 +11,7 @@ import { strToU8, zipSync } from 'fflate'
 import {
   ensureRuntime,
   extractZip,
+  fetchRuntimeManifest,
   readInstalledVersion,
   validateManifest,
   type BootstrapProgress,
@@ -357,5 +358,38 @@ describe('validateManifest', () => {
 
   it('rejects a manifest with an invalid sha256', () => {
     expect(() => { validateManifest(manifest({ sha256: 'zzz' })) }).toThrow(/sha256/)
+  })
+})
+
+describe('fetchRuntimeManifest', () => {
+  it('fetches and validates a served manifest', async () => {
+    const server = await startServer()
+    try {
+      server.setRoutes({ '/manifest.json': strToU8(JSON.stringify(manifest())) })
+      const fetched = await fetchRuntimeManifest(`${server.baseUrl}/manifest.json`)
+      expect(fetched).toEqual(manifest())
+      expect(server.requested).toContain('/manifest.json')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('rejects a manifest the server answers with an error status', async () => {
+    const server = await startServer()
+    try {
+      await expect(fetchRuntimeManifest(`${server.baseUrl}/missing.json`)).rejects.toThrow(/HTTP 404/)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('rejects a served manifest that fails validation', async () => {
+    const server = await startServer()
+    try {
+      server.setRoutes({ '/manifest.json': strToU8(JSON.stringify(manifest({ url: 'ftp://example.com/runtime.zip' }))) })
+      await expect(fetchRuntimeManifest(`${server.baseUrl}/manifest.json`)).rejects.toThrow(/no http/)
+    } finally {
+      await server.close()
+    }
   })
 })

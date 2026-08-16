@@ -10,6 +10,8 @@ const SPLASH_HEIGHT = 380
 export interface SplashSurface {
   /** Repaint the progress bar and status text for one observation. */
   update(progress: BootstrapProgress): void
+  /** Show or replace the update banner (an empty string hides it). */
+  setMessage(message: string): void
   /** Destroy the window. */
   close(): void
 }
@@ -68,6 +70,7 @@ export function createSplashWindow(htmlPath: string): SplashSurface {
   })
 
   let lastKey = ''
+  let lastBanner: string | undefined
 
   return {
     update(progress) {
@@ -92,6 +95,19 @@ export function createSplashWindow(htmlPath: string): SplashSurface {
         if (detail !== null) detail.textContent = ${JSON.stringify(detailText(progress.detail))};
       })()`
       // The window may be destroyed (app quit) between scheduling and running; nothing to paint then.
+      void window.webContents.executeJavaScript(script).catch(() => {})
+    },
+    setMessage(message) {
+      if (window.isDestroyed()) return
+      if (message === lastBanner) return
+      lastBanner = message
+      const script = `(() => {
+        const banner = document.getElementById('update-banner');
+        if (banner !== null) {
+          banner.textContent = ${JSON.stringify(message)};
+          banner.style.display = ${JSON.stringify(message === '' ? 'none' : 'block')};
+        }
+      })()`
       void window.webContents.executeJavaScript(script).catch(() => {})
     },
     close() {
