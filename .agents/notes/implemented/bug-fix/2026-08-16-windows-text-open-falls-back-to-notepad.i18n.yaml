@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-16-windows-text-open-falls-back-to-notepad.md
+2026-08-16-windows-text-open-falls-back-to-notepad.md: 1838205a61f63d61e5b4fcbadc621df16f326988
+2026-08-16-windows-text-open-falls-back-to-notepad.zh.md: 1351fe8887ac717d3198a4fa177d914a5756a67a

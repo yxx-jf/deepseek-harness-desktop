@@ -96,8 +96,12 @@
 
     # The API gateway: the transport-agnostic dispatch face every client shape
     # shares. The base layer's agent-default-model service owns the default model.
+    # nativeOpen hands the settings/agent-preset "open file" actions to the
+    # platform opener (electron shell, macOS `open`, Windows `Invoke-Item`).
     - id: api-gateway
       name: '@deepseek-ai/dsh-host-apiproxy'
+      config:
+        nativeOpen: true
 
     - id: cordis-host-runner
       name: '@deepseek-ai/dsh-cordis-host-runner'

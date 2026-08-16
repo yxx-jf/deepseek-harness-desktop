@@ -106,6 +106,20 @@ async function openWindowsPath(path: string, signal: AbortSignal, run: PathOpene
   ], signal)
 }
 
+/**
+ * Open a text document in Notepad. Windows text formats (YAML, JSON) often
+ * carry no file association, and `Invoke-Item` then silently does nothing;
+ * Notepad always materialises the document. `Start-Process` returns before
+ * the editor exits, so the runner never blocks on the GUI lifetime.
+ */
+async function openWindowsTextEditor(path: string, signal: AbortSignal, run: PathOpenerRunner): Promise<void> {
+  await run('powershell.exe', [
+    '-NoProfile',
+    '-Command',
+    `Start-Process -FilePath notepad.exe -ArgumentList ${powershellLiteral(path)}`,
+  ], signal)
+}
+
 /** Translate a WSL path before handing it to the Windows desktop. */
 async function openWslPath(path: string, signal: AbortSignal, run: PathOpenerRunner): Promise<void> {
   const translated = await run('wslpath', ['-w', path], signal)
@@ -136,6 +150,10 @@ async function openNativePathWithIntent(
   }
 
   if (platform === 'win32') {
+    if (intent === 'text-editor') {
+      await openWindowsTextEditor(path, signal, run)
+      return
+    }
     await openWindowsPath(path, signal, run)
     return
   }

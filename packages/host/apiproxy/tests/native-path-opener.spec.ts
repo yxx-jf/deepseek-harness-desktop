@@ -97,12 +97,16 @@ describe('native path opener', () => {
     )
   })
 
-  it('uses the Windows desktop association for text documents', async () => {
+  it('opens Windows text documents in Notepad regardless of file association', async () => {
     const run = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
-    await openNativeTextFile('C:\\work\\settings.yaml', signal(), { platform: 'win32', run })
+    await openNativeTextFile("C:\\work\\o'reilly settings.yaml", signal(), { platform: 'win32', run })
     expect(run).toHaveBeenCalledWith(
       'powershell.exe',
-      ['-NoProfile', '-Command', "Invoke-Item -LiteralPath 'C:\\work\\settings.yaml'"],
+      [
+        '-NoProfile',
+        '-Command',
+        "Start-Process -FilePath notepad.exe -ArgumentList 'C:\\work\\o''reilly settings.yaml'",
+      ],
       expect.any(AbortSignal),
     )
   })
