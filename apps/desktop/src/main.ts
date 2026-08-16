@@ -8,8 +8,10 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   net,
   session,
   shell,
@@ -95,6 +97,29 @@ function splashHtmlPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, 'desktop-resources/splash.html')
     : join(DESKTOP_DIR, 'resources/splash.html')
+}
+
+/** Path of the sandboxed preload bridge, from the checkout in development or desktop-resources when packaged. */
+function preloadPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'desktop-resources/preload.cjs')
+    : join(DESKTOP_DIR, 'resources/preload.cjs')
+}
+
+/** Accept one of the three theme-source values electron-updater's nativeTheme understands. */
+function isThemeSource(value: unknown): value is 'light' | 'dark' | 'system' {
+  return value === 'light' || value === 'dark' || value === 'system'
+}
+
+/**
+ * Wire the renderer's optional desktop bridge: mirror the app theme onto the
+ * native chrome. `nativeTheme.themeSource` drives Windows title-bar dark
+ * mode through DWM, so the window chrome follows the in-app theme choice.
+ */
+function wireDesktopBridge(): void {
+  ipcMain.handle('desktop:set-native-theme', (_event, source: unknown) => {
+    if (isThemeSource(source)) nativeTheme.themeSource = source
+  })
 }
 
 /**
@@ -225,6 +250,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      preload: preloadPath(),
     },
   })
   mainWindow = window
@@ -280,6 +306,7 @@ function requestAppQuit(): Promise<void> {
 
 async function boot(): Promise<void> {
   if (bootQuitPromise !== undefined) return
+  wireDesktopBridge()
   // The splash doubles as the startup surface: it renders runtime bootstrap
   // progress and announces app-update detection, so an update is offered from
   // the very first frame instead of after the main window settles.

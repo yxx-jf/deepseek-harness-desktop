@@ -9,6 +9,13 @@
  */
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 
+/** Optional desktop-shell bridge injected by the Electron preload, absent in a plain browser. */
+declare global {
+  interface Window {
+    desktop?: { setNativeTheme(source: string): void }
+  }
+}
+
 /** Body attribute selecting the dark base palette in the token stylesheets. */
 export const DARK_ATTRIBUTE = 'data-ds-dark-theme'
 
@@ -48,6 +55,9 @@ export class ThemePresenter {
     }
     this.themeColorMeta.content = getComputedStyle(body).backgroundColor
     if (!this.themeColorMeta.isConnected) document.head.append(this.themeColorMeta)
+    // Optional desktop-shell bridge: mirror the raw preference (not the
+    // resolved scheme) so `system` keeps following the OS in the native chrome.
+    window.desktop?.setNativeTheme(snapshot.preference)
   }
 
   /** Retract root color-scheme, the palette attribute, token variables, and the owned metadata node. */

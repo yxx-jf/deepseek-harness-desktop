@@ -17,6 +17,9 @@ function bootThemeScript(preference: ThemePreference): string {
   const dark = preference === 'dark' || systemDark
   document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
   document.body.toggleAttribute('data-ds-dark-theme', dark)
+  // The Electron shell mirrors the preference onto the native chrome (title
+  // bar); a plain browser has no bridge and this is a no-op.
+  window.desktop?.setNativeTheme(preference)
 })()</script>`
 }
 

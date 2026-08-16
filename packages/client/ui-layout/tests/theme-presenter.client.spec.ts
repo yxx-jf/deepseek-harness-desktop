@@ -11,10 +11,14 @@ import { DARK_ATTRIBUTE, ThemePresenter } from '@deepseek-ai/dsh-client-ui-layou
 const LIGHT_THEME_COLOR = 'rgb(255, 255, 255)'
 const DARK_THEME_COLOR = 'rgb(21, 21, 23)'
 
-function snapshot(colorScheme: 'light' | 'dark', tokens: Record<string, string> = {}): ThemeSnapshot {
+function snapshot(
+  colorScheme: 'light' | 'dark',
+  tokens: Record<string, string> = {},
+  preference: string = colorScheme,
+): ThemeSnapshot {
   // The presenter must key off colorScheme, not the id — keep them distinct.
   const active = { id: `${colorScheme}-test`, colorScheme, tokens }
-  return { preference: colorScheme, active, themes: [active], revision: 1 }
+  return { preference: preference as ThemeSnapshot['preference'], active, themes: [active], revision: 1 }
 }
 
 function clearThemePresentation(): void {
@@ -39,7 +43,10 @@ beforeEach(() => {
   document.head.append(style)
 })
 
-afterEach(clearThemePresentation)
+afterEach(() => {
+  clearThemePresentation()
+  delete window.desktop
+})
 
 describe('ThemePresenter', () => {
   it('light scheme sets root color-scheme and leaves the dark attribute absent', () => {
@@ -87,5 +94,15 @@ describe('ThemePresenter', () => {
     expect(document.body.style.getPropertyValue('--dsw-alias-bg')).toBe('')
     expect(document.body.style.getPropertyValue('--foreign')).toBe('kept')
     expect(meta?.isConnected).toBe(false)
+  })
+
+  it('mirrors the raw preference onto the optional desktop bridge', () => {
+    const calls: string[] = []
+    window.desktop = { setNativeTheme: (source) => { calls.push(source) } }
+    const presenter = new ThemePresenter()
+    // `system` must reach the bridge, not the resolved dark scheme.
+    presenter.apply(snapshot('dark', {}, 'system'))
+    presenter.apply(snapshot('light', {}, 'light'))
+    expect(calls).toEqual(['system', 'light'])
   })
 })
