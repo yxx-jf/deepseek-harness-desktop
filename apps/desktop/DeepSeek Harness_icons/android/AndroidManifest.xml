@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 将以下代码添加到您的 AndroidManifest.xml 文件中的 <application> 标签内 -->
+<application
+    android:name=".Application"
+    android:icon="@mipmap/ic_launcher"
+    android:roundIcon="@mipmap/ic_launcher_round"
+    android:label="@string/app_name"
+    android:theme="@style/AppTheme">
+
+    <!-- 您的其他应用组件 -->
+
+</application>
+
+<!-- 建议：为了支持 Android 8.0+ 的自适应图标，请创建自适应图标资源 -->
+<!-- 创建 res/mipmap-anydpi-v26/ic_launcher.xml -->
+<!-- 创建 res/mipmap-anydpi-v26/ic_launcher_round.xml -->
