@@ -124,8 +124,7 @@ async function openWindowsTextEditor(path: string, signal: AbortSignal, run: Pat
     '-Command',
     [
       `$choice = Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\${ext}\\UserChoice' -ErrorAction SilentlyContinue`,
-      `if ($choice -and $choice.ProgId) { Invoke-Item -LiteralPath ${literal} }`,
-      `else { $p = (New-Object -ComObject Scripting.FileSystemObject).GetFile(${literal}).ShortPath; rundll32.exe shell32.dll,OpenAs_RunDLL $p }`,
+      `if ($choice -and $choice.ProgId) { Invoke-Item -LiteralPath ${literal} } else { $p = (New-Object -ComObject Scripting.FileSystemObject).GetFile(${literal}).ShortPath; rundll32.exe shell32.dll,OpenAs_RunDLL $p }`,
     ].join('; '),
   ], signal)
 }
