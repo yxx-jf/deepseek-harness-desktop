@@ -107,16 +107,26 @@ async function openWindowsPath(path: string, signal: AbortSignal, run: PathOpene
 }
 
 /**
- * Open a text document in Notepad. Windows text formats (YAML, JSON) often
- * carry no file association, and `Invoke-Item` then silently does nothing;
- * Notepad always materialises the document. `Start-Process` returns before
- * the editor exits, so the runner never blocks on the GUI lifetime.
+ * Open a Windows text document through its file association, or the Open
+ * With dialog when none exists. `Invoke-Item` on an unassociated extension
+ * (YAML, JSON) silently does nothing, so the unassociated branch asks the
+ * user to pick a program; Windows then records the choice as the association
+ * for later opens. The dialog is shell-hosted, so rundll32 exits before the
+ * user finishes choosing and the runner never blocks on the dialog lifetime.
+ * rundll32's OpenAs_RunDLL truncates its argument at spaces, so the dialog
+ * branch hands it the 8.3 short path, which never contains spaces.
  */
 async function openWindowsTextEditor(path: string, signal: AbortSignal, run: PathOpenerRunner): Promise<void> {
+  const ext = extname(path).toLowerCase()
+  const literal = powershellLiteral(path)
   await run('powershell.exe', [
     '-NoProfile',
     '-Command',
-    `Start-Process -FilePath notepad.exe -ArgumentList ${powershellLiteral(path)}`,
+    [
+      `$choice = Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\${ext}\\UserChoice' -ErrorAction SilentlyContinue`,
+      `if ($choice -and $choice.ProgId) { Invoke-Item -LiteralPath ${literal} }`,
+      `else { $p = (New-Object -ComObject Scripting.FileSystemObject).GetFile(${literal}).ShortPath; rundll32.exe shell32.dll,OpenAs_RunDLL $p }`,
+    ].join('; '),
   ], signal)
 }
 

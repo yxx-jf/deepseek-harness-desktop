@@ -97,18 +97,16 @@ describe('native path opener', () => {
     )
   })
 
-  it('opens Windows text documents in Notepad regardless of file association', async () => {
+  it('opens Windows text documents through the association or the Open With dialog', async () => {
     const run = vi.fn<PathOpenerRunner>(async () => ({ stdout: '', stderr: '' }))
     await openNativeTextFile("C:\\work\\o'reilly settings.yaml", signal(), { platform: 'win32', run })
-    expect(run).toHaveBeenCalledWith(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-Command',
-        "Start-Process -FilePath notepad.exe -ArgumentList 'C:\\work\\o''reilly settings.yaml'",
-      ],
-      expect.any(AbortSignal),
-    )
+    const [command, args] = run.mock.calls[0]!
+    expect(command).toBe('powershell.exe')
+    expect(args[0]).toBe('-NoProfile')
+    const script = args[2] as string
+    expect(script).toContain('FileExts\\.yaml\\UserChoice')
+    expect(script).toContain("Invoke-Item -LiteralPath 'C:\\work\\o''reilly settings.yaml'")
+    expect(script).toContain('rundll32.exe shell32.dll,OpenAs_RunDLL')
   })
 
   it('opens with Linux xdg-open', async () => {
