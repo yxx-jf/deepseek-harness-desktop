@@ -19,7 +19,7 @@ import {
   type Event,
   type MenuItemConstructorOptions,
 } from 'electron'
-import { ensureRuntime, extractZip, fetchRuntimeManifest, readInstalledVersion } from './runtime-bootstrap.ts'
+import { ensureRuntime, extractZip, fetchRuntimeManifestWithMirrors, readInstalledVersion } from './runtime-bootstrap.ts'
 import { extractZipParallel } from './parallel-extract.ts'
 import { createSplashWindow, type SplashSurface } from './splash.ts'
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
@@ -379,8 +379,16 @@ async function checkRuntimeForUpdates(): Promise<void> {
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return
   const runtimeDir = join(app.getPath('userData'), 'host')
+  const mirrors = (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
+    .split(',')
+    .map(mirror => mirror.trim())
+    .filter(mirror => mirror.length > 0)
   try {
-    const manifest = await fetchRuntimeManifest(manifestUrl, (input, init) => net.fetch(input instanceof URL ? input.href : input, init))
+    const manifest = await fetchRuntimeManifestWithMirrors(
+      manifestUrl,
+      (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+      mirrors,
+    )
     const installed = await readInstalledVersion(runtimeDir, HOST_ENTRY)
     if (installed === manifest.version) return
     const { response } = await dialog.showMessageBox({

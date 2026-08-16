@@ -6,12 +6,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import {
   ensureRuntime,
   extractZip,
   fetchRuntimeManifest,
+  fetchRuntimeManifestWithMirrors,
   readInstalledVersion,
   validateManifest,
   type BootstrapProgress,
@@ -423,5 +424,32 @@ describe('fetchRuntimeManifest', () => {
     } finally {
       await server.close()
     }
+  })
+
+  it('falls back to a mirror prefix when the primary manifest fetch fails', async () => {
+    const body = JSON.stringify(manifest())
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const target = String(url)
+      if (target.startsWith('http://primary.invalid')) return { ok: false, status: 502, json: async () => ({}) }
+      return { ok: true, status: 200, json: async () => JSON.parse(body) as RuntimeManifest }
+    })
+    const fetched = await fetchRuntimeManifestWithMirrors(
+      'http://primary.invalid/runtime-manifest.json',
+      fetchMock as never,
+      ['http://mirror.example/'],
+    )
+    expect(fetched).toEqual(manifest())
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://primary.invalid/runtime-manifest.json')
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe('http://mirror.example/http://primary.invalid/runtime-manifest.json')
+  })
+
+  it('rejects when every manifest candidate fails', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) }))
+    await expect(fetchRuntimeManifestWithMirrors(
+      'http://primary.invalid/runtime-manifest.json',
+      fetchMock as never,
+      ['http://mirror.example/'],
+    )).rejects.toThrow(/manifest fetch failed/)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

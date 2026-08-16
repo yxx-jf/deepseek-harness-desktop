@@ -153,6 +153,32 @@ export async function fetchRuntimeManifest(url: string, fetchImpl: typeof fetch 
   return manifest
 }
 
+/**
+ * Fetch and validate the runtime manifest, falling back to mirror prefixes
+ * when the primary URL fails. Mirrors must serve the identical bytes; the
+ * archive SHA-256 still gates the download that follows.
+ * @param url - Primary manifest URL.
+ * @param fetchImpl - HTTP client.
+ * @param mirrors - Prefixes prepended to the URL for fallback attempts.
+ * @returns The validated runtime manifest.
+ */
+export async function fetchRuntimeManifestWithMirrors(
+  url: string,
+  fetchImpl: typeof fetch,
+  mirrors: readonly string[],
+): Promise<RuntimeManifest> {
+  const candidates = [url, ...mirrors.map(mirror => `${mirror}${url}`)]
+  let lastError: unknown
+  for (const candidate of candidates) {
+    try {
+      return await fetchRuntimeManifest(candidate, fetchImpl)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw new Error(`runtime manifest fetch failed for ${url}`, { cause: lastError })
+}
+
 /** Per-attempt download bounds: an overall cap and a no-progress watchdog. */
 interface DownloadLimits {
   readonly timeoutMs: number
@@ -343,7 +369,11 @@ export async function ensureRuntime(options: RuntimeBootstrapOptions): Promise<B
   }
 
   report(progressOf('fetching-manifest'))
-  const manifest = await fetchRuntimeManifest(options.manifestUrl, fetchImpl)
+  const manifest = await fetchRuntimeManifestWithMirrors(
+    options.manifestUrl,
+    fetchImpl,
+    options.mirrorPrefixes ?? [],
+  )
 
   const installed = await readInstalledVersion(options.runtimeDir, options.hostEntry)
   if (installed === manifest.version) {
