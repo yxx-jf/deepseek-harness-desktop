@@ -23,6 +23,7 @@ import { createSplashWindow, type SplashSurface } from './splash.ts'
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
 import { createInstallerWatch, hasInstallerRow, type InstallerWatch } from './installer-watch.ts'
 import { createDesktopLifecycle, type DesktopLifecycle } from './window-lifecycle.ts'
+import { checkForUpdates, setupAutoUpdater } from './updater.ts'
 
 const APP_NAME = 'DeepSeek Harness'
 const WINDOW_WIDTH = 1440
@@ -251,6 +252,7 @@ function createTray(): void {
   tray.setToolTip(APP_NAME)
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
+    { label: '检查更新…', click: () => { checkForUpdates(true) } },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },
   ]
@@ -305,6 +307,11 @@ async function boot(): Promise<void> {
     reportError: (error) => { console.error('desktop shutdown failed:', error) },
   })
   createTray()
+  // App self-update is separate from the runtime bootstrap: wire the updater
+  // and check silently shortly after startup; the tray action reports "up to
+  // date" explicitly.
+  setupAutoUpdater({ getWindow: () => mainWindow })
+  setTimeout(() => { checkForUpdates(false) }, 15_000)
   // Quit ourselves as soon as the NSIS installer starts: the installer cannot
   // always force-kill a running app (an elevated app, or one shielded by
   // security software), while quitting from inside the process needs no kill

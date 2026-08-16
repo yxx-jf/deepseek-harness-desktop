@@ -11,7 +11,8 @@ export default defineConfig({
   fixedExtension: false,
   dts: false,
   clean: false,
-  // Electron stays a runtime builtin; fflate (used by the runtime bootstrap)
-  // must be inlined because the packaged shell ships no node_modules.
-  deps: { neverBundle: ['electron'], alwaysBundle: ['fflate'] },
+  // Electron stays a runtime builtin; fflate (runtime bootstrap) and
+  // electron-updater (app self-update) must be inlined because the packaged
+  // shell ships no node_modules.
+  deps: { neverBundle: ['electron'], alwaysBundle: ['fflate', 'electron-updater'] },
 })

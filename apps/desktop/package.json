@@ -20,6 +20,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "fflate": "^0.8.3"
   },
   "devDependencies": {
@@ -36,6 +37,11 @@
     "afterPack": "./scripts/verify-packaged-runtime.ts",
     "asar": true,
     "compression": "store",
+    "publish": {
+      "provider": "github",
+      "owner": "yxx-jf",
+      "repo": "deepseek-harness-desktop"
+    },
     "files": [
       "lib/**",
       "package.json"
