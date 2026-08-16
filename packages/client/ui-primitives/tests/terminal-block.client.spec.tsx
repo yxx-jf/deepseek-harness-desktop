@@ -376,19 +376,40 @@ describe('writeClipboard', () => {
     expect(writeText).toHaveBeenCalledWith('payload')
   })
 
-  it('reports false when the Clipboard API rejects', async () => {
+  it('falls back to execCommand when the Clipboard API rejects', async () => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
     })
+    const exec = vi.fn(() => true)
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: exec })
+    await expect(writeClipboard('payload')).resolves.toBe(true)
+    expect(exec).toHaveBeenCalledWith('copy')
+  })
+
+  it('reports execCommand\'s own refusal after a rejected async write', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    })
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => false) })
     await expect(writeClipboard('payload')).resolves.toBe(false)
   })
 
-  it('selects a detached textarea for the execCommand fallback and removes it after', async () => {
+  it('reports false when both the Clipboard API rejects and execCommand is absent', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    })
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: undefined })
+    await expect(writeClipboard('payload')).resolves.toBe(false)
+  })
+
+  it('selects a focused detached textarea for the execCommand fallback and removes it after', async () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
     let selected: string | undefined
     const exec = vi.fn(() => {
-      selected = document.querySelector<HTMLTextAreaElement>('textarea[readonly]')?.value
+      selected = (document.activeElement as HTMLTextAreaElement | null)?.value
       return true
     })
     Object.defineProperty(document, 'execCommand', { configurable: true, value: exec })

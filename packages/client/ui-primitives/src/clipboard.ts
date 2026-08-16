@@ -3,8 +3,9 @@
 
 /**
  * Write text to the host clipboard, preferring the async Clipboard API and
- * falling back to `execCommand('copy')` on hosts (jsdom, insecure contexts)
- * that omit it.
+ * falling back to `execCommand('copy')` on hosts that omit it or deny it
+ * (Electron renders with a restrictive permission policy, jsdom, insecure
+ * contexts).
  * @param text - the exact text to place on the clipboard.
  * @returns true only when the host accepted the write.
  */
@@ -17,13 +18,12 @@ export async function writeClipboard(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text)
       return true
     } catch {
-      // Denied permissions / iframe policy — do not claim success.
-      return false
+      // Denied permissions / iframe policy — try the execCommand fallback.
     }
   }
   // jsdom and older hosts: best-effort execCommand path when present.
   // execCommand('copy') is the only clipboard fallback where the async API
-  // is missing; deprecated but deliberately retained.
+  // is missing or refused; deprecated but deliberately retained.
   /* oxlint-disable typescript/no-deprecated */
   const exec = typeof document.execCommand === 'function'
     ? document.execCommand.bind(document)
@@ -35,6 +35,9 @@ export async function writeClipboard(text: string): Promise<boolean> {
   el.style.position = 'fixed'
   el.style.left = '-9999px'
   document.body.appendChild(el)
+  // execCommand('copy') requires the editable element to hold focus; without
+  // it the selection is empty and the copy silently fails in Electron.
+  el.focus()
   el.select()
   try {
     return exec('copy')
