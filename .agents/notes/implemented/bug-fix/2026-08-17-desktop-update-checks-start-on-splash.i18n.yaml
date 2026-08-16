@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-17-desktop-update-checks-start-on-splash.md
-2026-08-17-desktop-update-checks-start-on-splash.md: c96c11681a66b00ddd0b1607037ad5be75cd08da
-2026-08-17-desktop-update-checks-start-on-splash.zh.md: 14ffb743cb0d605ae8edb93933b5313b54f7a8aa
+2026-08-17-desktop-update-checks-start-on-splash.md: 9d1f0e288f7ccd864446a1894a6272a4a1cee48d
+2026-08-17-desktop-update-checks-start-on-splash.zh.md: ff0e6d2e7239c2dd6a85a4c06d516c1cd7235d0e

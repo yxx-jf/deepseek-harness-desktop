@@ -1,6 +1,6 @@
-/** In-app self-update (the app bundle, not the runtime) via GitHub Releases. */
+/** In-app self-update (the app bundle, not the runtime) via a mirror feed. */
 
-import { dialog, type BrowserWindow } from 'electron'
+import { dialog, Notification, type BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
 
 /** Window access for update dialogs; dialogs fall back to app-modal. */
@@ -19,30 +19,73 @@ let notifyNotAvailable = false
 /** Last percent reported by the download-progress event (throttle the splash). */
 let lastReportedPercent = -1
 
+/** Whether the user accepted the pending update in this session. */
+let updateAccepted = false
+
 /** Show a message box, parenting to the main window when one exists. */
 function showMessage(options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> {
   const window = hooks?.getWindow()
   return window === undefined ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options)
 }
 
+/** Whether the main window is currently visible (an active session exists). */
+function mainVisible(): boolean {
+  const window = hooks?.getWindow()
+  return window !== undefined && !window.isDestroyed() && window.isVisible()
+}
+
 /**
- * Wire electron-updater to the GitHub Releases source declared in the build
- * config. This updates the app bundle (the installer), which is separate from
- * the runtime bootstrap: both run on startup and via the tray action.
- * @param updaterHooks - Callbacks the updater needs to reach the main window and the splash.
+ * Wire electron-updater to a generic mirror feed (the same mirror that serves
+ * the runtime, so the installer downloads at mirror speed instead of stalling
+ * on a direct GitHub link). The app bundle update is separate from the
+ * runtime bootstrap; both are checked on startup and via the tray action.
+ * @param updaterHooks - Callbacks the updater needs to reach the window and the splash.
+ * @param feedUrl - Generic mirror base URL with latest.yml and installers; omitted in development.
  */
-export function setupAutoUpdater(updaterHooks: UpdaterHooks): void {
+export function setupAutoUpdater(updaterHooks: UpdaterHooks, feedUrl?: string): void {
   hooks = updaterHooks
   lastReportedPercent = -1
+  updateAccepted = false
+  if (feedUrl !== undefined && feedUrl.length > 0) {
+    autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl })
+  }
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
-  console.info('desktop updater: wired (github provider, automatic startup check)')
+  console.info(`desktop updater: wired (${feedUrl === undefined ? 'github provider' : 'generic mirror feed'}, user-confirmed updates)`)
 
   autoUpdater.on('update-available', (info) => {
+    if (updateAccepted) return
     console.info(`desktop update available: ${info.version}`)
-    hooks?.onUpdateMessage?.(`发现新版本 v${info.version}，正在自动下载…`)
-    // Downloading proceeds without asking; only the restart is gated below.
-    void autoUpdater.downloadUpdate()
+    hooks?.onUpdateMessage?.(`发现新版本 v${info.version}`)
+    void showMessage({
+      type: 'question',
+      title: '发现新版本',
+      message: `发现新版本 v${info.version}，是否立即更新？`,
+      detail: '选择“立即更新”将下载新版本并自动重启安装；选择“暂不”继续使用当前版本。',
+      buttons: ['立即更新', '暂不'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response !== 0) return
+      updateAccepted = true
+      hooks?.onUpdateMessage?.(`正在下载新版本 v${info.version}…`)
+      if (mainVisible()) {
+        // An active session sees the download through a system notification;
+        // during startup the splash paints the same message as a banner.
+        new Notification({ title: '正在下载更新', body: `正在下载新版本 v${info.version}…` }).show()
+      }
+      void autoUpdater.downloadUpdate().catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error)
+        console.error('desktop update download failed:', error)
+        hooks?.onUpdateMessage?.(`新版本下载失败：${detail}`)
+        void showMessage({
+          type: 'error',
+          title: '下载更新失败',
+          message: '新版本下载失败，请稍后重试。',
+          detail: `${detail}\n\n也可以从 GitHub Release 手动下载安装包：\nhttps://github.com/yxx-jf/deepseek-harness-desktop/releases`,
+        })
+      })
+    })
   })
 
   autoUpdater.on('download-progress', (progress) => {
@@ -60,27 +103,15 @@ export function setupAutoUpdater(updaterHooks: UpdaterHooks): void {
   })
 
   autoUpdater.on('update-downloaded', (info) => {
-    console.info(`desktop update downloaded; ready to install: ${info.version}`)
+    if (!updateAccepted) return
+    console.info(`desktop update downloaded; installing: ${info.version}`)
     hooks?.onUpdateMessage?.(`新版本 v${info.version} 已下载，正在重启安装…`)
-    // During startup the main window does not exist yet, so nothing is lost
-    // by installing immediately. Once a window is visible the user confirms,
-    // because a spontaneous restart would discard their work.
-    const window = hooks?.getWindow()
-    const mainVisible = window !== undefined && !window.isDestroyed() && window.isVisible()
-    if (!mainVisible) {
-      autoUpdater.quitAndInstall()
-      return
+    if (mainVisible()) {
+      new Notification({ title: '更新完成', body: '新版本已下载，正在重启安装…' }).show()
     }
-    void showMessage({
-      type: 'info',
-      title: '更新已就绪',
-      message: '新版本已下载完成，是否立即重启安装？',
-      buttons: ['立即重启', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-    }).then(({ response }) => {
-      if (response === 0) autoUpdater.quitAndInstall()
-    })
+    // The user already accepted the update, so no second prompt: restart and
+    // let the NSIS installer replace the app.
+    autoUpdater.quitAndInstall()
   })
 
   autoUpdater.on('error', (error) => {
@@ -89,7 +120,7 @@ export function setupAutoUpdater(updaterHooks: UpdaterHooks): void {
 }
 
 /**
- * Check GitHub Releases for a newer installer. In development (unpackaged)
+ * Check the mirror feed for a newer installer. In development (unpackaged)
  * there is no update metadata and the check fails silently unless the caller
  * asks to report errors.
  * @param notifyWhenCurrent - Report "already up to date" when no update exists.

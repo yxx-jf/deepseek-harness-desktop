@@ -98,6 +98,17 @@ function splashHtmlPath(): string {
 }
 
 /**
+ * Mirror base URL that hosts the app installers and `latest.yml`, used as the
+ * generic update feed. The mirror serves the same CDN prefix as the runtime,
+ * so the installer downloads at mirror speed instead of stalling on a direct
+ * GitHub link. The environment variable overrides the default.
+ */
+function appUpdateFeedUrl(): string | undefined {
+  if (!app.isPackaged) return undefined
+  return process.env.DSH_APP_UPDATE_URL ?? 'https://gh-proxy.com/https://github.com/yxx-jf/dsh-dist/releases/download/v0.1.0/'
+}
+
+/**
  * Resolve the Host paths for this launch. In development the checkout is the
  * runtime. Packaged, the bundled runtime is authoritative unless a remote
  * manifest URL is configured, in which case the runtime is bootstrapped into
@@ -276,10 +287,11 @@ async function boot(): Promise<void> {
   setupAutoUpdater({
     getWindow: () => mainWindow,
     onUpdateMessage: (message) => { splash.setMessage(message) },
-  })
-  // Check for an app update immediately rather than after a startup delay. The
-  // updater downloads on its own and installs automatically while the splash
-  // is still up, before any user work exists to lose.
+  }, appUpdateFeedUrl())
+  // Check for an app update immediately rather than after a startup delay. An
+  // available update asks the user (update / stay on the current version) from
+  // the splash, and the accepted download installs before the main window
+  // exists, so no user work is at risk.
   checkForUpdates(false)
   try {
     const paths = await resolveHostPaths(splash)
