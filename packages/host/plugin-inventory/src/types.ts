@@ -20,6 +20,10 @@ export interface PluginInventoryEntry {
   /** Effective Loader enablement, including disabled ancestor groups. */
   readonly enabled: boolean
   readonly fiberPhase: PluginFiberPhase
+  /** Human-readable plugin purpose, from the package description. */
+  readonly description: string
+  /** Whether the plugin ships in the official harness scope. */
+  readonly origin: 'official' | 'third-party'
 }
 
 /** Point-in-time inventory returned by the plugin inventory Remote. */

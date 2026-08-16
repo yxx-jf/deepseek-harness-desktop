@@ -3,6 +3,7 @@ import { Context, type Plugin } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import PluginInventoryGateway from '../src/index.ts'
+import type { PluginEntryId } from '../src/types.ts'
 
 const contexts: Context[] = []
 
@@ -39,6 +40,7 @@ describe('PluginInventoryGateway', () => {
     })
     expect(remoteMethods(inventory)).toEqual([
       { method: 'list', invocation: { kind: 'direct' } },
+      { method: 'setEnabled', invocation: { kind: 'direct' } },
     ])
   })
 
@@ -60,18 +62,24 @@ describe('PluginInventoryGateway', () => {
         moduleName: 'cordis:active',
         enabled: true,
         fiberPhase: 'active',
+        description: '',
+        origin: 'official',
       },
       {
         entryId: pendingId,
         moduleName: 'cordis:pending',
         enabled: true,
         fiberPhase: 'pending',
+        description: '',
+        origin: 'official',
       },
       {
         entryId: disabledId,
         moduleName: 'cordis:not-installed',
         enabled: false,
         fiberPhase: null,
+        description: '',
+        origin: 'official',
       },
     ]))
 
@@ -81,9 +89,31 @@ describe('PluginInventoryGateway', () => {
       moduleName: 'cordis:active',
       enabled: false,
       fiberPhase: null,
+      description: '',
+      origin: 'official',
     })
 
     await ctx.loader.remove(pendingId)
     expect(inventory.list().entries.some(entry => entry.entryId === pendingId)).toBe(false)
+  })
+
+  it('enables and disables one entry through setEnabled', async () => {
+    const { ctx, inventory } = await harness()
+    const id = await ctx.loader.create({ name: 'cordis:active' }) as PluginEntryId
+    await inventory.setEnabled(id, false)
+    expect(inventory.list().entries.find(entry => entry.entryId === id)).toMatchObject({
+      enabled: false,
+      fiberPhase: null,
+    })
+    await inventory.setEnabled(id, true)
+    expect(inventory.list().entries.find(entry => entry.entryId === id)).toMatchObject({
+      enabled: true,
+      fiberPhase: 'active',
+    })
+  })
+
+  it('rejects setEnabled for an unknown entry id', async () => {
+    const { inventory } = await harness()
+    await expect(inventory.setEnabled('missing' as never, false)).rejects.toThrow(/not found/)
   })
 })

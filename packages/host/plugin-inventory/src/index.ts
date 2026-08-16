@@ -1,5 +1,7 @@
 /** Read-only projection of the current Cordis Loader plugin entries. */
 
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import type { Context, FiberState } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
@@ -17,6 +19,27 @@ export type * from './types.ts'
 /** Brand an existing Loader-tree entry id at the owning boundary. */
 function pluginEntryId(value: string): PluginEntryId {
   return value as PluginEntryId
+}
+
+/** Whether a module specifier names the official harness scope. */
+function pluginOrigin(moduleName: string): PluginInventoryEntry['origin'] {
+  return moduleName.startsWith('@deepseek-ai/dsh-')
+    || moduleName.startsWith('@deepseek-ai/cordis-')
+    || moduleName.startsWith('cordis:')
+    ? 'official'
+    : 'third-party'
+}
+
+/** Read a plugin package description; built-in `cordis:` modules carry none. */
+function packageDescription(name: string): string {
+  if (name.startsWith('cordis:')) return ''
+  try {
+    const pkgPath = createRequire(import.meta.url).resolve(`${name}/package.json`)
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { description?: unknown }
+    return typeof pkg.description === 'string' ? pkg.description : ''
+  } catch {
+    return ''
+  }
 }
 
 /** Runtime mirror: FiberState is a cross-package const enum. */
@@ -63,9 +86,29 @@ export class PluginInventoryGateway extends TypertRemoteService {
         moduleName: entry.options.name,
         enabled: !entry.disabled,
         fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state],
+        description: packageDescription(entry.options.name),
+        origin: pluginOrigin(entry.options.name),
       })
     }
     return { entries }
+  }
+
+  /**
+   * Enable or disable one Loader entry for this session. The change applies
+   * immediately through the entry's live fiber (start or dispose) and is
+   * persisted by the owning loader tree when it has a durable backing store.
+   * @param entryId - Loader-tree id of the target entry.
+   * @param enabled - Target enablement state.
+   */
+  @Remote('setEnabled')
+  async setEnabled(entryId: PluginEntryId, enabled: boolean): Promise<void> {
+    for (const entry of this.ctx.loader.entries()) {
+      if (entry.options.group) continue
+      if (pluginEntryId(entry.id) !== entryId) continue
+      await entry.update({ disabled: !enabled })
+      return
+    }
+    throw new Error(`plugin entry not found: ${entryId}`)
   }
 }
 

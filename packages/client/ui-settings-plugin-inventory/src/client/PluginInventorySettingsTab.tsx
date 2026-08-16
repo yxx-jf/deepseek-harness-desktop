@@ -12,6 +12,8 @@ import css from './PluginInventorySettingsTab.module.css'
 export interface PluginInventorySettingsTabInjected {
   /** Read a current Host inventory snapshot. */
   list: () => Promise<PluginInventorySnapshot>
+  /** Enable or disable one plugin entry (persisted by the Host). */
+  setEnabled: (entryId: PluginInventoryEntry['entryId'], enabled: boolean) => Promise<void>
 }
 
 type PluginInventoryEntry = PluginInventorySnapshot['entries'][number]
@@ -60,12 +62,14 @@ function matches(entry: PluginInventoryEntry, normalizedQuery: string): boolean 
     .some(value => value.toLocaleLowerCase().includes(normalizedQuery))
 }
 
-/** Render the read-only current Loader inventory. */
-export function PluginInventorySettingsTab({ list, t }: PluginInventorySettingsTabProps): ReactNode {
+/** Render the Loader inventory with per-entry enablement and provenance. */
+export function PluginInventorySettingsTab({ list, setEnabled, t }: PluginInventorySettingsTabProps): ReactNode {
   const catalogId = useId()
   const [request, setRequest] = useState(0)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<PluginInventoryEntry['entryId'] | null>(null)
+  const [pendingId, setPendingId] = useState<PluginInventoryEntry['entryId'] | null>(null)
+  const [actionError, setActionError] = useState(false)
   const [state, setState] = useState<ViewState>({ status: 'loading' })
 
   useEffect(() => {
@@ -96,6 +100,21 @@ export function PluginInventorySettingsTab({ list, t }: PluginInventorySettingsT
     setRequest(value => value + 1)
   }
 
+  /** Toggle one entry, then refresh so the Live snapshot reflects the change. */
+  const toggle = async (entry: PluginInventoryEntry): Promise<void> => {
+    if (pendingId !== null) return
+    setPendingId(entry.entryId)
+    setActionError(false)
+    try {
+      await setEnabled(entry.entryId, !entry.enabled)
+      setRequest(value => value + 1)
+    } catch {
+      setActionError(true)
+    } finally {
+      setPendingId(null)
+    }
+  }
+
   return (
     <div className={css.section} aria-busy={state.status === 'loading'}>
       {state.status === 'loading' ? <p className={css.status}>{t('loading')}</p> : null}
@@ -105,6 +124,7 @@ export function PluginInventorySettingsTab({ list, t }: PluginInventorySettingsT
           <button type="button" onClick={retry}>{t('retry')}</button>
         </div>
       ) : null}
+      {actionError ? <p className={css.failure} role="alert">{t('toggleError')}</p> : null}
       {state.status === 'ready' ? (
         <div className={css.catalog}>
           <label className={css.search}>
@@ -168,6 +188,30 @@ export function PluginInventorySettingsTab({ list, t }: PluginInventorySettingsT
                         <IconChevronDownOutline14 className={css.chevron} size={12} aria-hidden="true" />
                       </span>
                     </button>
+                    <div className={css.cardMeta}>
+                      <span className={css.originBadge} data-origin={entry.origin}>
+                        {entry.origin === 'official' ? t('official') : t('thirdParty')}
+                      </span>
+                      <p className={css.description} title={entry.description}>
+                        {entry.description || t('noDescription')}
+                      </p>
+                      <button
+                        className={css.switch}
+                        type="button"
+                        role="switch"
+                        aria-checked={entry.enabled}
+                        aria-label={`${title} ${t('toggleLabel')}`}
+                        disabled={pendingId === entry.entryId}
+                        onClick={() => { void toggle(entry) }}
+                      >
+                        <span className={css.switchTrack} aria-hidden="true">
+                          <span className={css.switchThumb} />
+                        </span>
+                        <span className={css.switchText}>
+                          {pendingId === entry.entryId ? t('toggling') : entry.enabled ? t('enabledTag') : t('disabledTag')}
+                        </span>
+                      </button>
+                    </div>
                     {open ? (
                       <div className={css.cardDetails} id={detailId}>
                         <code className={css.entryValue} data-loader-entry>{entry.entryId}</code>
