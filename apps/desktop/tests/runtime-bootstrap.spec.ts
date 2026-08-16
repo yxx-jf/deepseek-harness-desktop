@@ -163,6 +163,38 @@ describe('ensureRuntime', () => {
     expect(server.requested).toEqual(['/runtime-manifest.json'])
   })
 
+  it('uses the installed runtime as-is when the update check is skipped', async () => {
+    await installLocally('v1')
+    // A newer manifest exists, but skipping the check must not consult it.
+    server = await startServer({
+      '/runtime-manifest.json': Buffer.from(JSON.stringify(manifest({ version: 'v2' }))),
+    })
+    const outcome = await ensureRuntime({
+      manifestUrl: `${server.baseUrl}/runtime-manifest.json`,
+      runtimeDir,
+      hostEntry: HOST_ENTRY,
+      skipUpdateCheck: true,
+    })
+    expect(outcome.downloaded).toBe(false)
+    expect(outcome.version).toBe('v1')
+    expect(server.requested).toEqual([])
+  })
+
+  it('still bootstraps a missing runtime when the update check is skipped', async () => {
+    const archive = hostArchive()
+    server = await startServer()
+    server.setRoutes(runtimeRoutes(server.baseUrl, archive))
+    const outcome = await ensureRuntime({
+      manifestUrl: `${server.baseUrl}/runtime-manifest.json`,
+      runtimeDir,
+      hostEntry: HOST_ENTRY,
+      skipUpdateCheck: true,
+    })
+    expect(outcome.downloaded).toBe(true)
+    expect(outcome.version).toBe('v1')
+    expect(server.requested).toContain('/runtime.zip')
+  })
+
   it('replaces a stale runtime', async () => {
     await installLocally('v0')
     const archive = hostArchive()

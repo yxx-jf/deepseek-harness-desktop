@@ -12,6 +12,8 @@ export interface SplashSurface {
   update(progress: BootstrapProgress): void
   /** Show or replace the update banner (an empty string hides it). */
   setMessage(message: string): void
+  /** The native window, for parenting modal dialogs above the always-on-top splash. */
+  getWindow(): BrowserWindow
   /** Destroy the window. */
   close(): void
 }
@@ -109,6 +111,9 @@ export function createSplashWindow(htmlPath: string): SplashSurface {
         }
       })()`
       void window.webContents.executeJavaScript(script).catch(() => {})
+    },
+    getWindow() {
+      return window
     },
     close() {
       if (!window.isDestroyed()) window.destroy()

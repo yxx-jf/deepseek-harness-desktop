@@ -25,7 +25,7 @@ import { createSplashWindow, type SplashSurface } from './splash.ts'
 import { createHostSupervisor, spawnDshWeb, type HostSupervisor } from './host-supervisor.ts'
 import { createInstallerWatch, hasInstallerRow, type InstallerWatch } from './installer-watch.ts'
 import { createDesktopLifecycle, type DesktopLifecycle } from './window-lifecycle.ts'
-import { checkForUpdates, setupAutoUpdater } from './updater.ts'
+import { checkAppUpdate, setupAutoUpdater } from './updater.ts'
 
 const APP_NAME = 'DeepSeek Harness'
 const WINDOW_WIDTH = 1440
@@ -55,6 +55,7 @@ let hostOrigin: string | undefined
 let bootQuitPromise: Promise<void> | undefined
 let quitReleased = false
 let installerWatch: InstallerWatch | undefined
+let activeSplash: SplashSurface | undefined
 
 /** Resolve artifacts from the checkout in development and a runtime root when packaged. */
 function hostPaths(runtimeRoot: string): HostPaths {
@@ -137,9 +138,11 @@ function appUpdateFeedUrl(): string | undefined {
  * Resolve the Host paths for this launch. In development the checkout is the
  * runtime. Packaged, the bundled runtime is authoritative unless a remote
  * manifest URL is configured, in which case the runtime is bootstrapped into
- * the user data directory first (showing a splash while it downloads).
+ * the user data directory first (showing a splash while it downloads). When
+ * {@link skipRuntimeUpdate} is set the installed runtime is used as-is unless
+ * nothing is installed yet.
  */
-async function resolveHostPaths(splash: SplashSurface | undefined): Promise<HostPaths> {
+async function resolveHostPaths(splash: SplashSurface | undefined, skipRuntimeUpdate: boolean): Promise<HostPaths> {
   if (!app.isPackaged) return hostPaths(REPOSITORY_ROOT)
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return hostPaths(join(process.resourcesPath, 'host'))
@@ -152,7 +155,7 @@ async function resolveHostPaths(splash: SplashSurface | undefined): Promise<Host
     // against the OS store and honors system proxy settings. Node's bundled
     // CA fetch rejects machines with locally installed roots (intercepting
     // proxies, security suites), so the runtime download must not use it.
-    fetch: (input, init) => net.fetch(String(input), init),
+    fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
     // Flaky links to release CDNs stall mid-stream; abort a stalled attempt
     // and retry, then fall back to mirror prefixes that prepend to the
     // archive URL (the manifest SHA-256 gates every attempt).
@@ -174,6 +177,7 @@ async function resolveHostPaths(splash: SplashSurface | undefined): Promise<Host
       }
     },
     onProgress: (progress) => { splash?.update(progress) },
+    skipUpdateCheck: skipRuntimeUpdate,
   })
   return hostPaths(outcome.runtimeDir)
 }
@@ -277,7 +281,7 @@ function createTray(): void {
   tray.setToolTip(APP_NAME)
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
-    { label: '检查更新…', click: () => { checkForUpdates(true); void checkRuntimeForUpdates() } },
+    { label: '检查更新…', click: () => { void checkAppUpdate(true); void checkRuntimeForUpdates() } },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },
   ]
@@ -307,21 +311,25 @@ function requestAppQuit(): Promise<void> {
 async function boot(): Promise<void> {
   if (bootQuitPromise !== undefined) return
   wireDesktopBridge()
-  // The splash doubles as the startup surface: it renders runtime bootstrap
-  // progress and announces app-update detection, so an update is offered from
-  // the very first frame instead of after the main window settles.
+  // The splash doubles as the startup surface: update prompts are parented to
+  // it (so they float above its always-on-top window) and it paints download
+  // and bootstrap progress.
   const splash = createSplashWindow(splashHtmlPath())
+  activeSplash = splash
   setupAutoUpdater({
     getWindow: () => mainWindow,
-    onUpdateMessage: (message) => { splash.setMessage(message) },
+    getSplash: () => activeSplash?.getWindow(),
+    onUpdateMessage: (message) => { activeSplash?.setMessage(message) },
   }, appUpdateFeedUrl())
-  // Check for an app update immediately rather than after a startup delay. An
-  // available update asks the user (update / stay on the current version) from
-  // the splash, and the accepted download installs before the main window
-  // exists, so no user work is at risk.
-  checkForUpdates(false)
+  // Serial update sequence: decide the app update first, then the runtime.
+  // Accepting or declining the app update skips the runtime check this launch
+  // — an accepted install relaunches the app, and that relaunch (now up to
+  // date) runs the runtime check. Only when no app update exists does the
+  // runtime check run now. Declining therefore updates nothing at all.
+  const decision = await checkAppUpdate(false)
+  const skipRuntimeUpdate = decision !== 'none'
   try {
-    const paths = await resolveHostPaths(splash)
+    const paths = await resolveHostPaths(splash, skipRuntimeUpdate)
     assertHostArtifacts(paths)
     host = createHostSupervisor({
       spawnHost: () => spawnDshWeb({
@@ -361,6 +369,7 @@ async function boot(): Promise<void> {
     }
     await lifecycle.showWindow()
   } finally {
+    activeSplash = undefined
     splash.close()
   }
 }
@@ -371,7 +380,7 @@ async function checkRuntimeForUpdates(): Promise<void> {
   if (manifestUrl === undefined) return
   const runtimeDir = join(app.getPath('userData'), 'host')
   try {
-    const manifest = await fetchRuntimeManifest(manifestUrl, (input, init) => net.fetch(String(input), init))
+    const manifest = await fetchRuntimeManifest(manifestUrl, (input, init) => net.fetch(input instanceof URL ? input.href : input, init))
     const installed = await readInstalledVersion(runtimeDir, HOST_ENTRY)
     if (installed === manifest.version) return
     const { response } = await dialog.showMessageBox({

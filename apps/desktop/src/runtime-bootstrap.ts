@@ -76,6 +76,12 @@ export interface RuntimeBootstrapOptions {
    * the manifest SHA-256 still gates every attempt.
    */
   readonly mirrorPrefixes?: readonly string[]
+  /**
+   * Skip the update check and use the installed runtime as-is. An absent
+   * install still bootstraps (the app cannot run without a Host); a present
+   * one is trusted without consulting the manifest.
+   */
+  readonly skipUpdateCheck?: boolean
 }
 
 /** Marker written inside an installed runtime directory. */
@@ -324,6 +330,17 @@ async function installStagedRuntime(stagingDir: string, runtimeDir: string, mani
 export async function ensureRuntime(options: RuntimeBootstrapOptions): Promise<BootstrapOutcome> {
   const fetchImpl = options.fetch ?? fetch
   const report = (progress: BootstrapProgress): void => options.onProgress?.(progress)
+
+  // A user who declined the app update gets no background runtime download
+  // either; use the installed runtime as-is. A missing install still needs a
+  // bootstrap or the app cannot start, so only the present case short-circuits.
+  if (options.skipUpdateCheck === true) {
+    const installed = await readInstalledVersion(options.runtimeDir, options.hostEntry)
+    if (installed !== undefined) {
+      report(progressOf('ready', 100, installed))
+      return { runtimeDir: options.runtimeDir, downloaded: false, version: installed }
+    }
+  }
 
   report(progressOf('fetching-manifest'))
   const manifest = await fetchRuntimeManifest(options.manifestUrl, fetchImpl)
