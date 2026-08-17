@@ -13,12 +13,18 @@ import type {
   PluginInventoryEntry,
   PluginInventorySnapshot,
 } from './types.ts'
+import { CHINESE_DESCRIPTIONS } from './chinese-descriptions.ts'
 
 export type * from './types.ts'
 
 /** Brand an existing Loader-tree entry id at the owning boundary. */
 function pluginEntryId(value: string): PluginEntryId {
   return value as PluginEntryId
+}
+
+/** Unscoped module key (e.g. `dsh-llm` for `@deepseek-ai/dsh-llm`). */
+function pluginKey(name: string): string {
+  return name.startsWith('@') ? name.slice(name.indexOf('/') + 1) : name
 }
 
 /** Whether a module specifier names the official harness scope. */
@@ -30,8 +36,11 @@ function pluginOrigin(moduleName: string): PluginInventoryEntry['origin'] {
     : 'third-party'
 }
 
-/** Read a plugin package description; built-in `cordis:` modules carry none. */
+/** Read a plugin description, preferring the Chinese map; `cordis:` built-ins carry descriptions there. */
 function packageDescription(name: string): string {
+  const key = pluginKey(name)
+  const zh = CHINESE_DESCRIPTIONS[key]
+  if (zh !== undefined) return zh
   if (name.startsWith('cordis:')) return ''
   try {
     const pkgPath = createRequire(import.meta.url).resolve(`${name}/package.json`)
@@ -106,6 +115,9 @@ export class PluginInventoryGateway extends TypertRemoteService {
       if (entry.options.group) continue
       if (pluginEntryId(entry.id) !== entryId) continue
       await entry.update({ disabled: !enabled })
+      // Persist to the owning loader tree. Include (cordis.yml) trees write
+      // back to the file; the root Loader tree is in-memory only (no-op).
+      entry.parent.tree.write()
       return
     }
     throw new Error(`plugin entry not found: ${entryId}`)

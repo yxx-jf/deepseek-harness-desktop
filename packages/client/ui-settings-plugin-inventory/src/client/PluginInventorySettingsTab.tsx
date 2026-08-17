@@ -192,7 +192,7 @@ export function PluginInventorySettingsTab({ list, setEnabled, t }: PluginInvent
                       <span className={css.originBadge} data-origin={entry.origin}>
                         {entry.origin === 'official' ? t('official') : t('thirdParty')}
                       </span>
-                      <p className={css.description} title={entry.description}>
+                      <p className={css.description} title={entry.description || undefined}>
                         {entry.description || t('noDescription')}
                       </p>
                       <button

@@ -327,6 +327,16 @@ async function boot(): Promise<void> {
   // date) runs the runtime check. Only when no app update exists does the
   // runtime check run now. Declining therefore updates nothing at all.
   const decision = await checkAppUpdate(false)
+  if (decision === 'installing') {
+    // Splash stays open painting download progress (onUpdateMessage).
+    // update-downloaded → quitAndInstall() closes the app naturally.
+    // The tray is created later, but the user should not need it during
+    // a download; the splash is always-on-top and the download completes
+    // on its own. If the download fails, the updater shows an error dialog
+    // and the user can quit from the tray (which is created below).
+    createTray()
+    return
+  }
   const skipRuntimeUpdate = decision !== 'none'
   try {
     const paths = await resolveHostPaths(splash, skipRuntimeUpdate)
