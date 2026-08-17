@@ -10,6 +10,10 @@ export interface UpdaterHooks {
   readonly getSplash?: () => BrowserWindow | undefined
   /** Receive update-status text for the startup splash; no-op after it closes. */
   readonly onUpdateMessage?: (message: string) => void
+  /** Receive download percentage for the splash progress bar. */
+  readonly onUpdateProgress?: (percent: number) => void
+  /** Show a download surface (splash) even when the main window is already open. */
+  readonly ensureSplash?: () => void
 }
 
 /** Outcome of one app-update check for the startup sequence. */
@@ -59,6 +63,7 @@ export function setupAutoUpdater(updaterHooks: UpdaterHooks, feedUrl?: string): 
     const percent = Math.round(progress.percent)
     if (percent === lastReportedPercent) return
     lastReportedPercent = percent
+    hooks?.onUpdateProgress?.(percent)
     hooks?.onUpdateMessage?.(`正在下载新版本… ${percent}%`)
   })
 
@@ -118,6 +123,10 @@ export function checkAppUpdate(notifyWhenCurrent = false): Promise<AppUpdateDeci
           return
         }
         updateAccepted = true
+        // Force a download surface: the splash covers the main window with a
+        // live progress bar, so the user sees the download either way.
+        hooks?.ensureSplash?.()
+        hooks?.onUpdateProgress?.(0)
         hooks?.onUpdateMessage?.(`正在下载新版本 v${info.version}…`)
         if (mainVisible()) {
           // An active session sees the download through a system notification;

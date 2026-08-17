@@ -64,6 +64,7 @@ describe('PluginInventoryGateway', () => {
         fiberPhase: 'active',
         description: '',
         origin: 'official',
+        toggleable: false,
       },
       {
         entryId: pendingId,
@@ -72,6 +73,7 @@ describe('PluginInventoryGateway', () => {
         fiberPhase: 'pending',
         description: '',
         origin: 'official',
+        toggleable: false,
       },
       {
         entryId: disabledId,
@@ -80,6 +82,7 @@ describe('PluginInventoryGateway', () => {
         fiberPhase: null,
         description: '',
         origin: 'official',
+        toggleable: false,
       },
     ]))
 
@@ -91,6 +94,7 @@ describe('PluginInventoryGateway', () => {
       fiberPhase: null,
       description: '',
       origin: 'official',
+      toggleable: false,
     })
 
     await ctx.loader.remove(pendingId)

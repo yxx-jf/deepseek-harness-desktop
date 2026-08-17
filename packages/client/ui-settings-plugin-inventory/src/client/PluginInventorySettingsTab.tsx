@@ -70,6 +70,7 @@ export function PluginInventorySettingsTab({ list, setEnabled, t }: PluginInvent
   const [expanded, setExpanded] = useState<PluginInventoryEntry['entryId'] | null>(null)
   const [pendingId, setPendingId] = useState<PluginInventoryEntry['entryId'] | null>(null)
   const [actionError, setActionError] = useState(false)
+  const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null)
   const [state, setState] = useState<ViewState>({ status: 'loading' })
 
   useEffect(() => {
@@ -192,25 +193,36 @@ export function PluginInventorySettingsTab({ list, setEnabled, t }: PluginInvent
                       <span className={css.originBadge} data-origin={entry.origin}>
                         {entry.origin === 'official' ? t('official') : t('thirdParty')}
                       </span>
-                      <p className={css.description} title={entry.description || undefined}>
+                      <p
+                        className={css.description}
+                        title={entry.description || undefined}
+                        onMouseEnter={(e) => {
+                          if (!entry.description) return
+                          const rect = e.currentTarget.getBoundingClientRect()
+                          setTooltip({ text: entry.description, x: rect.left, y: rect.top - 8 })
+                        }}
+                        onMouseLeave={() => { setTooltip(null) }}
+                      >
                         {entry.description || t('noDescription')}
                       </p>
-                      <button
-                        className={css.switch}
-                        type="button"
-                        role="switch"
-                        aria-checked={entry.enabled}
-                        aria-label={`${title} ${t('toggleLabel')}`}
-                        disabled={pendingId === entry.entryId}
-                        onClick={() => { void toggle(entry) }}
-                      >
-                        <span className={css.switchTrack} aria-hidden="true">
-                          <span className={css.switchThumb} />
-                        </span>
-                        <span className={css.switchText}>
-                          {pendingId === entry.entryId ? t('toggling') : entry.enabled ? t('enabledTag') : t('disabledTag')}
-                        </span>
-                      </button>
+                      {entry.toggleable ? (
+                        <button
+                          className={css.switch}
+                          type="button"
+                          role="switch"
+                          aria-checked={entry.enabled}
+                          aria-label={`${title} ${t('toggleLabel')}`}
+                          disabled={pendingId === entry.entryId}
+                          onClick={() => { void toggle(entry) }}
+                        >
+                          <span className={css.switchTrack} aria-hidden="true">
+                            <span className={css.switchThumb} />
+                          </span>
+                          <span className={css.switchText}>
+                            {pendingId === entry.entryId ? t('toggling') : entry.enabled ? t('enabledTag') : t('disabledTag')}
+                          </span>
+                        </button>
+                      ) : null}
                     </div>
                     {open ? (
                       <div className={css.cardDetails} id={detailId}>
@@ -234,6 +246,15 @@ export function PluginInventorySettingsTab({ list, setEnabled, t }: PluginInvent
               })}
             </ul>
           ) : null}
+        </div>
+      ) : null}
+      {tooltip !== null ? (
+        <div
+          className={css.tooltip}
+          role="tooltip"
+          style={{ left: tooltip.x, top: tooltip.y }}
+        >
+          {tooltip.text}
         </div>
       ) : null}
     </div>

@@ -97,6 +97,7 @@ export class PluginInventoryGateway extends TypertRemoteService {
         fiberPhase: entry.fiber === undefined ? null : FIBER_PHASE[entry.fiber.state],
         description: packageDescription(entry.options.name),
         origin: pluginOrigin(entry.options.name),
+        toggleable: !entry.options.name.startsWith('cordis:'),
       })
     }
     return { entries }

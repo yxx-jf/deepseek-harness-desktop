@@ -12,6 +12,8 @@ export interface SplashSurface {
   update(progress: BootstrapProgress): void
   /** Show or replace the update banner (an empty string hides it). */
   setMessage(message: string): void
+  /** Set download progress percentage (0-100) for the app-update surface. */
+  setProgress(percent: number): void
   /** The native window, for parenting modal dialogs above the always-on-top splash. */
   getWindow(): BrowserWindow
   /** Destroy the window. */
@@ -73,6 +75,7 @@ export function createSplashWindow(htmlPath: string): SplashSurface {
 
   let lastKey = ''
   let lastBanner: string | undefined
+  let lastPercent = -1
 
   return {
     update(progress) {
@@ -109,6 +112,20 @@ export function createSplashWindow(htmlPath: string): SplashSurface {
           banner.textContent = ${JSON.stringify(message)};
           banner.style.display = ${JSON.stringify(message === '' ? 'none' : 'block')};
         }
+      })()`
+      void window.webContents.executeJavaScript(script).catch(() => {})
+    },
+    setProgress(percent) {
+      if (window.isDestroyed()) return
+      if (percent === lastPercent) return
+      lastPercent = percent
+      const script = `(() => {
+        const fill = document.getElementById('progress-fill');
+        if (fill !== null) fill.style.width = ${JSON.stringify(`${percent}%`)};
+        const pct = document.getElementById('progress-percent');
+        if (pct !== null) pct.textContent = ${JSON.stringify(percent === 0 ? '' : `${percent}%`)};
+        const label = document.getElementById('progress-label');
+        if (label !== null) label.textContent = '正在下载新版本…';
       })()`
       void window.webContents.executeJavaScript(script).catch(() => {})
     },

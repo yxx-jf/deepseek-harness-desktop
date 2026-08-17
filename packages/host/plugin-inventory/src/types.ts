@@ -24,6 +24,8 @@ export interface PluginInventoryEntry {
   readonly description: string
   /** Whether the plugin ships in the official harness scope. */
   readonly origin: 'official' | 'third-party'
+  /** Whether the entry can be toggled (built-in `cordis:` entries are not). */
+  readonly toggleable: boolean
 }
 
 /** Point-in-time inventory returned by the plugin inventory Remote. */

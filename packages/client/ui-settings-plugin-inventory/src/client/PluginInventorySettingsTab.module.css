@@ -364,6 +364,22 @@
   white-space: nowrap;
 }
 
+.tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 360px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+  border: 1px solid var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-shadow-lv1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: none;
+  transform: translateY(-100%);
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .chevron {
     transition: transform 140ms var(--ds-ease-in-out);

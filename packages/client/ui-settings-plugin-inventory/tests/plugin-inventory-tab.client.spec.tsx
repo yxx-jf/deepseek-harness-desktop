@@ -28,6 +28,7 @@ function entry(overrides: Partial<Entry> = {}): Entry {
     fiberPhase: 'active',
     description: 'LLM capability',
     origin: 'official',
+    toggleable: true,
     ...overrides,
   }
 }

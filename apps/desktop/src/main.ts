@@ -320,6 +320,12 @@ async function boot(): Promise<void> {
     getWindow: () => mainWindow,
     getSplash: () => activeSplash?.getWindow(),
     onUpdateMessage: (message) => { activeSplash?.setMessage(message) },
+    onUpdateProgress: (percent) => { activeSplash?.setProgress(percent) },
+    ensureSplash: () => {
+      if (activeSplash === undefined) {
+        activeSplash = createSplashWindow(splashHtmlPath())
+      }
+    },
   }, appUpdateFeedUrl())
   // Serial update sequence: decide the app update first, then the runtime.
   // Accepting or declining the app update skips the runtime check this launch
