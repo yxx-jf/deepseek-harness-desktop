@@ -11,7 +11,7 @@ const DESKTOP = join(dirname(fileURLToPath(import.meta.url)), '..')
 const OUT_DIR = join(DESKTOP, 'tmp')
 mkdirSync(OUT_DIR, { recursive: true })
 
-const ZIP_URL = 'https://github.com/yxx-jf/dsh-dist/releases/download/v0.1.0/dsh-runtime-0.1.0-rc.5-42cf7a3c467e.zip'
+const ZIP_URL = 'https://github.com/yxx-jf/deepseek-harness-desktop/releases/download/v0.1.0/dsh-runtime-0.1.0-rc.5-42cf7a3c467e.zip'
 
 /** The exact DOM patch the main process drives (mirrors src/splash.ts). */
 function patchScript(progress) {

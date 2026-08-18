@@ -29,7 +29,7 @@ jobs:
         # the runtime archive itself is published separately (needs a token for
         # the dsh-dist repository), so write the config and upload the installer
         # update triple (exe + latest.yml + blockmap) here.
-        run: node -e "require('node:fs').writeFileSync('resources/runtime-config.json', JSON.stringify({ manifestUrl: 'https://github.com/yxx-jf/dsh-dist/releases/download/v0.1.0/runtime-manifest.json' }))"
+        run: node -e "require('node:fs').writeFileSync('resources/runtime-config.json', JSON.stringify({ manifestUrl: 'https://github.com/yxx-jf/deepseek-harness-desktop/releases/download/v0.1.0/runtime-manifest.json' }))"
       - name: Build installer
         run: pnpm run dist:win:fast
       - name: Publish GitHub release

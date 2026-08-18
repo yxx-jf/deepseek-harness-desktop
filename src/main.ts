@@ -131,7 +131,7 @@ function wireDesktopBridge(): void {
  */
 function appUpdateFeedUrl(): string | undefined {
   if (!app.isPackaged) return undefined
-  return process.env.DSH_APP_UPDATE_URL ?? 'https://github.akams.cn/https://github.com/yxx-jf/dsh-dist/releases/download/v0.1.0/'
+  return process.env.DSH_APP_UPDATE_URL ?? 'https://github.akams.cn/https://github.com/yxx-jf/deepseek-harness-desktop/releases/download/v0.1.0/'
 }
 
 /**
