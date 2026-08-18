@@ -29,14 +29,14 @@ jobs:
         # the runtime archive itself is published separately (needs a token for
         # the dsh-dist repository), so write the config and upload the installer
         # update triple (exe + latest.yml + blockmap) here.
-        run: node -e "require('node:fs').writeFileSync('apps/desktop/resources/runtime-config.json', JSON.stringify({ manifestUrl: 'https://github.com/yxx-jf/dsh-dist/releases/download/v0.1.0/runtime-manifest.json' }))"
+        run: node -e "require('node:fs').writeFileSync('resources/runtime-config.json', JSON.stringify({ manifestUrl: 'https://github.com/yxx-jf/dsh-dist/releases/download/v0.1.0/runtime-manifest.json' }))"
       - name: Build installer
-        run: pnpm --filter @deepseek-ai/dsh-desktop run dist:win:fast
+        run: pnpm run dist:win:fast
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version }}
           files: |
-            apps/desktop/dist/DeepSeek-Harness-*.exe
-            apps/desktop/dist/latest.yml
-            apps/desktop/dist/DeepSeek-Harness-*.exe.blockmap
+            dist/DeepSeek-Harness-*.exe
+            dist/latest.yml
+            dist/DeepSeek-Harness-*.exe.blockmap
