@@ -1,8 +1,9 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
-import { execFile } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { execFile, spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   app,
@@ -38,6 +39,12 @@ const HOST_ENTRY = 'node_modules/@deepseek-ai/dsh/lib/bin.js'
 const INSTALLER_PROCESS_PATTERN = 'DeepSeek-Harness*'
 /** Poll cadence for the installer watcher (milliseconds). */
 const INSTALLER_POLL_INTERVAL_MS = 1_000
+/** Root of DSH user data (`~/.dsh` by default). */
+const DSH_HOME = join(homedir(), '.dsh')
+/** The web profile manifest/lock directory plugins land in. */
+const WEB_PROFILE_DIR = join(DSH_HOME, 'profiles/web')
+/** Where Git-hosted repos are cloned for inspecting/installing plugins. */
+const PLUGIN_CLONE_DIR = join(DSH_HOME, 'plugins')
 
 /** Resolved artifacts needed to launch the desktop Host process. */
 interface HostPaths {
@@ -48,6 +55,7 @@ interface HostPaths {
 }
 
 let mainWindow: BrowserWindow | undefined
+let managerWindow: BrowserWindow | undefined
 let tray: Tray | undefined
 let host: HostSupervisor | undefined
 let lifecycle: DesktopLifecycle | undefined
@@ -119,9 +127,135 @@ function isThemeSource(value: unknown): value is 'light' | 'dark' | 'system' {
  */
 function wireDesktopBridge(): void {
   ipcMain.handle('desktop:set-native-theme', (_event, source: unknown) => {
-    console.log(`[desktop] native theme set: ${String(source)}, shouldUseDarkColors=${nativeTheme.shouldUseDarkColors}`)
     if (isThemeSource(source)) nativeTheme.themeSource = source
-    console.log(`[desktop] after set: shouldUseDarkColors=${nativeTheme.shouldUseDarkColors}, themeSource=${nativeTheme.themeSource}`)
+  })
+  ipcMain.handle('desktop:plugin-list', async (): Promise<{ ok: true; plugins: string[] } | { ok: false; error: string }> => {
+    try {
+      const pkgPath = join(WEB_PROFILE_DIR, 'package.json')
+      if (!existsSync(pkgPath)) return { ok: true, plugins: [] }
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { dsh?: { profile?: { bundles?: unknown } } }
+      const bundles = pkg.dsh?.profile?.bundles
+      if (!Array.isArray(bundles)) return { ok: true, plugins: [] }
+      // Show only user-installed plugins (hide built-in @deepseek-ai/ bundles).
+      return { ok: true, plugins: bundles.filter(b => typeof b === 'string' && !b.startsWith('@deepseek-ai/')) as string[] }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('desktop:plugin-resolve', async (_event, address: string): Promise<PluginResult & { candidates?: PluginCandidate[] }> => {
+    return resolvePluginAddress(address)
+  })
+  ipcMain.handle('desktop:plugin-install', async (_event, path: string): Promise<PluginResult> => {
+    const pkgPath = join(path, 'package.json')
+    if (!existsSync(pkgPath)) return { ok: false, error: '该目录不是有效的插件包（缺少 package.json）' }
+    const result = await runDshPlugin(['add', path])
+    if (!result.ok) return { ok: false, error: result.message }
+    return { ok: true }
+  })
+  ipcMain.handle('desktop:plugin-uninstall', async (_event, name: string): Promise<PluginResult> => {
+    const result = await runDshPlugin(['remove', name])
+    if (!result.ok) return { ok: false, error: result.message }
+    return { ok: true }
+  })
+  ipcMain.handle('desktop:open-plugin-manager', (): void => {
+    openPluginManager()
+  })
+  ipcMain.handle('desktop:quit', async (): Promise<void> => {
+    app.relaunch()
+    void requestAppQuit()
+  })
+  ipcMain.handle('desktop:plugin-search', async (_event, category: string, query: string): Promise<{ ok: true; repos: GitHubRepo[] } | { ok: false; error: string }> => {
+    if (category !== 'community' && category !== 'theme') return { ok: false, error: 'category 必须是 community 或 theme' }
+    try {
+      const result = await searchGitHubRepos(category, query)
+      if (result.error !== undefined && result.repos.length === 0) return { ok: false, error: result.error }
+      return { ok: true, repos: result.repos }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('desktop:plugin-subscriptions', async (): Promise<{ ok: true; subscriptions: Record<string, PluginSubscription> }> => {
+    return { ok: true, subscriptions: readSubscriptions() }
+  })
+  ipcMain.handle('desktop:plugin-subscribe', async (_event, repoUrl: string): Promise<PluginResult & { candidates?: PluginCandidate[] }> => {
+    try {
+      const url = repoUrl.trim()
+      if (url === '') return { ok: false, error: '地址为空' }
+      // Clone or update the repo.
+      const cloned = await cloneRepo(url)
+      if (!cloned.ok) return { ok: false, error: cloned.error }
+      if (cloned.path === undefined) return { ok: false, error: '克隆成功但未知路径' }
+      const candidates = scanForPluginCandidates(cloned.path)
+      // Save subscription.
+      const subs = readSubscriptions()
+      subs[url] = {
+        repoUrl: url,
+        repoName: repoFolderName(url),
+        clonePath: cloned.path,
+        enabledBundle: null,
+        subscribedAt: new Date().toISOString(),
+      }
+      writeSubscriptions(subs)
+      return { ok: true, candidates }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('desktop:plugin-enable', async (_event, repoUrl: string, bundlePath: string): Promise<PluginResult & { bundleName?: string }> => {
+    try {
+      const pkgPath = join(bundlePath, 'package.json')
+      if (!existsSync(pkgPath)) return { ok: false, error: '该目录不是有效的插件包（缺少 package.json）' }
+      const result = await runDshPlugin(['add', bundlePath])
+      if (!result.ok) return { ok: false, error: result.message }
+      // Read the bundle name from package.json.
+      let bundleName = ''
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown }
+        bundleName = typeof pkg.name === 'string' ? pkg.name : ''
+      } catch { /* ignore */ }
+      const subs = readSubscriptions()
+      if (subs[repoUrl] !== undefined) {
+        subs[repoUrl].enabledBundle = bundleName
+        writeSubscriptions(subs)
+      }
+      return { ok: true, bundleName }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('desktop:plugin-disable', async (_event, repoUrl: string, bundleName: string): Promise<PluginResult> => {
+    try {
+      const result = await runDshPlugin(['remove', bundleName])
+      if (!result.ok) return { ok: false, error: result.message }
+      const subs = readSubscriptions()
+      if (subs[repoUrl] !== undefined) {
+        subs[repoUrl].enabledBundle = null
+        writeSubscriptions(subs)
+      }
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('desktop:plugin-unsubscribe', async (_event, repoUrl: string): Promise<PluginResult> => {
+    try {
+      const subs = readSubscriptions()
+      const sub = subs[repoUrl]
+      if (sub === undefined) return { ok: false, error: '未找到订阅记录' }
+      // Disable first if enabled.
+      if (sub.enabledBundle) {
+        await runDshPlugin(['remove', sub.enabledBundle])
+      }
+      // Delete cloned files (retry on a transient lock).
+      try { await removeIfExists(sub.clonePath) } catch (error) {
+        return { ok: false, error: `删除本地文件失败：${error instanceof Error ? error.message : String(error)}` }
+      }
+      delete subs[repoUrl]
+      writeSubscriptions(subs)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
   })
 }
 
@@ -247,6 +381,373 @@ function hardenSession(): void {
   desktopSession.setPermissionRequestHandler((_webContents, permission, callback) => { callback(allowed(permission)) })
 }
 
+/** Result of a main-process plugin operation, serialized over IPC. */
+type PluginResult = { ok: true } | { ok: false; error: string }
+/** One installable plugin package discovered under an address. */
+interface PluginCandidate { readonly name: string; readonly path: string }
+/** A subscribed plugin repo (files cloned locally, activation optional). */
+interface PluginSubscription {
+  repoUrl: string
+  repoName: string
+  clonePath: string
+  /** Bundle package name currently enabled in the profile, or null when disabled. */
+  enabledBundle: string | null
+  subscribedAt: string
+}
+/** One result row from the GitHub plugin search. */
+interface GitHubRepo {
+  id: number
+  name: string
+  fullName: string
+  owner: string
+  description: string
+  stars: number
+  htmlUrl: string
+  cloneUrl: string
+  topics: string[]
+}
+
+/** Local manifest of every subscribed plugin repo. */
+function subscriptionsFile(): string {
+  return join(PLUGIN_CLONE_DIR, 'subscriptions.json')
+}
+function readSubscriptions(): Record<string, PluginSubscription> {
+  try {
+    return JSON.parse(readFileSync(subscriptionsFile(), 'utf8')) as Record<string, PluginSubscription>
+  } catch {
+    return {}
+  }
+}
+function writeSubscriptions(subs: Record<string, PluginSubscription>): void {
+  mkdirSync(PLUGIN_CLONE_DIR, { recursive: true })
+  writeFileSync(subscriptionsFile(), JSON.stringify(subs, null, 2))
+}
+
+/** Short in-memory cache for GitHub searches (unauthenticated rate limits). */
+const searchCache = new Map<string, { at: number; repos: GitHubRepo[] }>()
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000
+/** Error descriptions per search key, for surfacing to the UI. */
+const searchErrors = new Map<string, string>()
+
+/** Per-request attempt timeout, short so every mirror gets a fair try. */
+const GITHUB_ATTEMPT_TIMEOUT_MS = 6_000
+
+/**
+ * GitHub mirror prefixes tried after the direct URL. `DSH_GITHUB_MIRRORS`
+ * (comma-separated) overrides; otherwise a set of common mainland-accessible
+ * proxies that prepend to a full github.com / api.github.com URL.
+ */
+function githubMirrorPrefixes(): string[] {
+  const fromEnv = (process.env.DSH_GITHUB_MIRRORS ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+  if (fromEnv.length > 0) return fromEnv
+  return [
+    'https://ghfast.top/',
+    'https://gh-proxy.com/',
+    'https://ghproxy.net/',
+    'https://github.akams.cn/',
+  ]
+}
+
+/** Candidate URLs for one original, direct first then mirrors (deduped). */
+function mirrorUrlCandidates(original: string): string[] {
+  const candidates = [original]
+  for (const prefix of githubMirrorPrefixes()) {
+    const mirrored = `${prefix}${original}`
+    if (!candidates.includes(mirrored)) candidates.push(mirrored)
+  }
+  return candidates
+}
+
+/**
+ * Fetch with a hard timeout via Promise.race — net.fetch may ignore an abort
+ * signal on a stalled DNS/TCP, but the race always fires on time.
+ */
+async function fetchWithTimeout(url: string, timeoutMs = GITHUB_ATTEMPT_TIMEOUT_MS, init?: RequestInit): Promise<Response> {
+  return await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), timeoutMs)
+    net.fetch(url, init).then(
+      (res) => { clearTimeout(timer); resolve(res) },
+      (err) => { clearTimeout(timer); reject(err) },
+    )
+  })
+}
+
+/** Query GitHub's repository search for dsh plugins, sorted by stars. */
+async function searchGitHubRepos(category: 'community' | 'theme', query: string): Promise<{ repos: GitHubRepo[]; error?: string }> {
+  const q = query.trim()
+  // Theme category unions the theme/skin topics (deduped below); community is the umbrella topic.
+  const topics = category === 'theme' ? ['dsh-theme', 'dsh-skin'] : ['dsh-plugin']
+  const cacheKey = `${category}:${q}`
+  const cached = searchCache.get(cacheKey)
+  if (cached !== undefined && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return { repos: cached.repos }
+
+  searchErrors.clear()
+  const merged = new Map<number, GitHubRepo>()
+  const results = await Promise.all(topics.map(topic => fetchTopic(topic, q)))
+  for (const items of results) {
+    for (const repo of items) merged.set(repo.id, repo)
+  }
+  const repos = Array.from(merged.values()).sort((a, b) => b.stars - a.stars)
+  searchCache.set(cacheKey, { at: Date.now(), repos })
+  // If nothing loaded and every attempt errored, surface it instead of an empty list.
+  if (repos.length === 0 && searchErrors.size > 0) {
+    const reasons = [...new Set(searchErrors.values())].join('；')
+    return { repos: [], error: `无法访问 GitHub（${reasons}）。已尝试直连与国内镜像，请检查网络后重试。` }
+  }
+  return { repos }
+}
+
+/** Race one GitHub topic search across direct + mirrors; [] if all fail. */
+async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
+  const searchQuery = `topic:${topic}${q === '' ? '' : ` ${q}`}`
+  const direct = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=stars&order=desc&per_page=30`
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'deepseek-harness-desktop',
+  }
+  // Fire direct + every mirror in parallel; first valid response wins.
+  const attempts = mirrorUrlCandidates(direct).map(async (url) => {
+    const response = await fetchWithTimeout(url, GITHUB_ATTEMPT_TIMEOUT_MS, { headers })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const body = await response.json() as { items?: unknown[] }
+    const out: GitHubRepo[] = []
+    for (const item of body.items ?? []) {
+      const repo = item as {
+        id: number; name?: unknown; full_name?: unknown; html_url?: unknown; clone_url?: unknown
+        owner?: { login?: unknown } | null; description?: unknown; stargazers_count?: unknown; topics?: unknown
+      }
+      if (typeof repo.name !== 'string') continue
+      out.push({
+        id: repo.id,
+        name: repo.name,
+        fullName: typeof repo.full_name === 'string' ? repo.full_name : repo.name,
+        owner: typeof repo.owner?.login === 'string' ? repo.owner.login : '',
+        description: typeof repo.description === 'string' ? repo.description : '',
+        stars: typeof repo.stargazers_count === 'number' ? repo.stargazers_count : 0,
+        htmlUrl: typeof repo.html_url === 'string' ? repo.html_url : '',
+        cloneUrl: typeof repo.clone_url === 'string' ? repo.clone_url : `https://github.com/${repo.full_name ?? repo.name}.git`,
+        topics: Array.isArray(repo.topics) ? repo.topics.filter((t): t is string => typeof t === 'string') : [],
+      })
+    }
+    return out
+  })
+  try {
+    return await Promise.any(attempts)
+  } catch (error) {
+    // Every candidate failed; record a reason for the UI.
+    const reasons = error instanceof AggregateError
+      ? [...new Set(error.errors.map(e => e instanceof Error ? e.message : String(e)))].join('；')
+      : String(error)
+    searchErrors.set(`${topic}:${q}`, reasons)
+    return []
+  }
+}
+
+/** Resolve the dsh CLI entry the desktop app uses (development checkout or packaged runtime). */
+function dshCliEntry(): string {
+  const upstreamRoot = join(DESKTOP_DIR, 'upstream')
+  if (existsSync(upstreamRoot)) {
+    const dev = join(upstreamRoot, 'apps/cli/lib/bin.js')
+    if (existsSync(dev)) return dev
+  }
+  return join(process.resourcesPath, 'host', HOST_ENTRY)
+}
+
+/** The Node executable used to run the dsh CLI in this app context. */
+function dshNodeExecutable(): string {
+  return app.isPackaged ? process.execPath : (process.env.DSH_DESKTOP_NODE_EXECUTABLE ?? 'node')
+}
+
+/** Run one command, resolving with its exit code and captured output. */
+function runCommand(executable: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise) => {
+    execFile(
+      executable,
+      args,
+      {
+        cwd: options?.cwd,
+        env: options?.env === undefined ? undefined : { ...process.env, ...options.env },
+        windowsHide: true,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        resolvePromise({
+          code: error === null ? 0 : Number(error.code ?? '1'),
+          stdout,
+          stderr,
+        })
+      },
+    )
+  })
+}
+
+/** Run `dsh plugin ...` against the web profile through the app's own CLI. */
+async function runDshPlugin(pnpmArgs: string[]): Promise<{ ok: boolean; message: string }> {
+  const env = app.isPackaged ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env
+  const result = await runCommand(dshNodeExecutable(), ['--expose-internals', dshCliEntry(), 'plugin', '--profile', 'web', ...pnpmArgs], {
+    cwd: WEB_PROFILE_DIR,
+    env,
+  })
+  const output = `${result.stdout}\n${result.stderr}`.trim()
+  if (result.code !== 0) return { ok: false, message: output || `dsh plugin 退出码 ${result.code}` }
+  return { ok: true, message: output }
+}
+
+/** Derive a safe local folder name from a git clone URL. */
+function repoFolderName(url: string): string {
+  const cleaned = url.replace(/^https?:\/\//i, '').replace(/[\/]+$/g, '')
+  const parts = cleaned.split('/').filter(part => part.length > 0)
+  const tail = parts.at(-1) ?? 'repo'
+  const folder = tail.replace(/\.git$/i, '').replace(/[^\w.-]/g, '-')
+  return folder === '' ? 'repo' : folder
+}
+
+/** Scan a directory tree (root + direct children) for plugin packages. */
+function scanForPluginCandidates(root: string): PluginCandidate[] {
+  const candidates: PluginCandidate[] = []
+  const seen = new Set<string>()
+  const dirs = [root]
+  try {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (entry.isDirectory()) dirs.push(join(root, entry.name))
+    }
+  } catch {
+    // Unreadable root; fall through with just the root.
+  }
+  for (const dir of dirs) {
+    const pkgPath = join(dir, 'package.json')
+    if (!existsSync(pkgPath)) continue
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; dsh?: unknown }
+      // A plugin bundle/patch declares a `dsh` key; ignore bare packages.
+      if (pkg.dsh === undefined) continue
+      const name = typeof pkg.name === 'string' && pkg.name.length > 0 ? pkg.name : basename(dir)
+      const key = join(dir, name)
+      if (seen.has(key)) continue
+      seen.add(key)
+      candidates.push({ name, path: dir })
+    } catch {
+      // Malformed package.json; not a candidate.
+    }
+  }
+  return candidates
+}
+
+/** Wait helper for lock/scan retries. */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => { setTimeout(resolve, ms) })
+}
+
+/** Remove a path with retries. On Windows, if a persistent lock prevents
+ *  recursive delete, rename the tree (atomic, non-recursive → bypasses deep
+ *  locks) and schedule a detached rmdir so the cleanup does not block us. */
+async function removeIfExists(path: string): Promise<void> {
+  if (!existsSync(path)) return
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch {
+      if (attempt < 2) await sleep(500)
+    }
+  }
+  // Last resort: atomic rename then detached cleanup.
+  const backup = `${path}.del-${Date.now()}`
+  try { rmSync(backup, { recursive: true, force: true }) } catch { /* ignore */ }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      renameSync(path, backup)
+      break
+    } catch (error) {
+      if (attempt >= 2) throw error instanceof Error ? error : new Error(String(error))
+      await sleep(400)
+    }
+  }
+  if (process.platform === 'win32') {
+    // Detached cmd so the app does not wait for the recursive deletion.
+    const child = spawn('cmd', ['/c', 'rmdir', '/s', '/q', backup], {
+      detached: true, stdio: 'ignore', windowsHide: true,
+    })
+    child.unref()
+  } else {
+    try { rmSync(backup, { recursive: true, force: true }) } catch { /* ignore */ }
+  }
+}
+
+/** Clone a Git URL into the plugin staging area, trying direct then mirrors. */
+async function cloneRepo(url: string): Promise<PluginResult & { path?: string }> {
+  mkdirSync(PLUGIN_CLONE_DIR, { recursive: true })
+  const dest = join(PLUGIN_CLONE_DIR, repoFolderName(url))
+  // Only mirror github.com clones; other hosts (gitlab, gitee, local) go direct.
+  const candidates = /github\.com/iu.test(url) ? mirrorUrlCandidates(url) : [url]
+  let lastError = ''
+  for (const candidate of candidates) {
+    try {
+      // Clear a stale/locked clone before cloning (retries on transient locks).
+      await removeIfExists(dest)
+      const clone = await runCommand('git', ['clone', '--depth', '1', candidate, dest])
+      if (clone.code === 0) return { ok: true, path: dest }
+      lastError = clone.stderr.trim() || clone.stdout.trim() || `git clone 退出码 ${clone.code}`
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+  }
+  return { ok: false, error: lastError || 'git clone 失败' }
+}
+
+/** Resolve an install address into candidate plugin packages. */
+async function resolvePluginAddress(address: string): Promise<(PluginResult & { candidates?: PluginCandidate[] })> {
+  const trimmed = address.trim()
+  if (trimmed === '') return { ok: false, error: '地址为空' }
+  // Local path?
+  if (existsSync(trimmed)) {
+    return { ok: true, candidates: scanForPluginCandidates(trimmed) }
+  }
+  // HTTP(S) Git URL?
+if (/^https?:\/\//iu.test(trimmed)) {
+    const cloned = await cloneRepo(trimmed)
+    if (!cloned.ok) return { ok: false, error: cloned.error }
+    return { ok: true, candidates: scanForPluginCandidates(cloned.path!) }
+  }
+  return { ok: false, error: '地址无效：既不是本地目录，也不是 HTTP(s) 仓库地址' }
+}
+
+/** Open (or focus) the plugin manager dialog window. */
+function openPluginManager(): void {
+  let manager = managerWindow
+  if (manager !== undefined && !manager.isDestroyed()) {
+    manager.focus()
+    return
+  }
+  manager = new BrowserWindow({
+    width: 780,
+    height: 780,
+    minWidth: 580,
+    minHeight: 600,
+    show: false,
+    autoHideMenuBar: true,
+    title: '插件管理',
+    parent: mainWindow,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      preload: join(DESKTOP_DIR, 'resources/plugin-manager-preload.cjs'),
+    },
+  })
+  managerWindow = manager
+  manager.on('closed', () => {
+    if (managerWindow === manager) managerWindow = undefined
+  })
+  void manager.loadFile(join(DESKTOP_DIR, 'resources/plugin-manager.html')).then(() => {
+    if (!manager.isDestroyed()) manager.show()
+  })
+}
+
 async function createMainWindow(): Promise<BrowserWindow> {
   const origin = hostOrigin
   if (origin === undefined) throw new Error('desktop Host is not ready')
@@ -281,37 +782,49 @@ async function createMainWindow(): Promise<BrowserWindow> {
     if (isExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  window.webContents.on('console-message', (_event, level, message) => {
-    if (message.startsWith('[desktop]')) console.log(`[renderer] ${message}`)
-  })
   await window.loadURL(origin)
-  // Inject theme observer: sync the native title bar with the web app's theme.
+  // Inject theme observer + plugin manager button into the sidebar.
   window.webContents.executeJavaScript(`(() => {
-    console.log('[desktop] theme observer injected, desktop api?=' + (typeof window.desktop !== 'undefined'))
-    const sync = () => {
-      const attr = document.body?.getAttribute('data-ds-dark-theme')
-      const isDark = attr === ''
-      console.log('[desktop] theme sync, attr=' + attr + ', body?=' + (document.body !== null) + ', api?=' + (typeof window.desktop !== 'undefined'))
-      if (typeof window.desktop !== 'undefined') {
-        window.desktop.setNativeTheme(isDark ? 'dark' : 'light').then(() => {
-          console.log('[desktop] setNativeTheme resolved')
-        }).catch((e) => {
-          console.log('[desktop] setNativeTheme rejected: ' + String(e))
-        })
-      } else {
-        console.log('[desktop] window.desktop missing')
-      }
+    const api = window.desktop
+    if (typeof api === 'undefined') return
+
+    /* ── theme sync ── */
+    const syncTheme = () => {
+      const isDark = document.body?.getAttribute('data-ds-dark-theme') === ''
+      api.setNativeTheme(isDark ? 'dark' : 'light')
     }
-    sync()
-    try {
-      new MutationObserver(() => {
-        console.log('[desktop] mutation observed')
-        sync()
-      }).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
-    } catch (e) {
-      console.log('[desktop] observer error: ' + String(e))
+    syncTheme()
+    new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+
+    /* ── inject plugin manager button into the settings dialog ── */
+    const PLUGIN_BTN_ID = 'dsh-plugin-mgr-btn'
+    const injectBtn = () => {
+      if (document.getElementById(PLUGIN_BTN_ID) !== null) return
+      // The settings panel is the full-viewport modal dialog.
+      const dialog = document.querySelector('[role="dialog"][aria-modal="true"]')
+      if (dialog === null) return
+      // dialog → [nav, content]; content → [header, options]; header → [actions, close]
+      const content = dialog.children[1]
+      if (content === undefined) return
+      const header = content.children[0]
+      if (header === undefined) return
+      const actions = header.children[0]
+      if (actions === undefined) return
+      const btn = document.createElement('button')
+      btn.id = PLUGIN_BTN_ID
+      btn.setAttribute('type', 'button')
+      btn.setAttribute('aria-label', '插件管理')
+      btn.style.cssText = 'display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:none;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;line-height:30px;cursor:pointer;white-space:nowrap'
+      btn.innerHTML = '⚙ 插件管理'
+      btn.addEventListener('click', () => { api.openPluginManager() })
+      btn.addEventListener('mouseenter', () => { btn.style.background = 'var(--dsw-alias-interactive-bg-hover)' })
+      btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.06)' })
+      actions.appendChild(btn)
     }
-  })()`, true).then(() => console.log('[desktop] executeJavaScript resolved')).catch((e) => console.log('[desktop] executeJavaScript rejected: ' + String(e)))
+    // Keep re-injecting whenever the DOM changes (dialog opens/closes, React re-renders).
+    injectBtn()
+    new MutationObserver(injectBtn).observe(document.body, { childList: true, subtree: true })
+  })()`, true).catch(() => {})
   if (!lifecycle?.isQuitting) window.show()
   return window
 }
@@ -321,6 +834,7 @@ function createTray(): void {
   tray.setToolTip(APP_NAME)
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
+    { label: '插件管理…', click: () => { openPluginManager() } },
     { label: '检查更新…', click: () => { void checkAppUpdate(true); void checkRuntimeForUpdates() } },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },

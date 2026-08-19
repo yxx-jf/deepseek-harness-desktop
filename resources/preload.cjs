@@ -9,7 +9,17 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('desktop', {
   /** Mirror a theme preference (light/dark/system) onto the native chrome. */
-  setNativeTheme: (source) => ipcRenderer.invoke('desktop:set-native-theme', source),
+  setNativeTheme: (source) => ipcRenderer.invoke('desktop:set-native-theme', source),  /** Open the plugin manager dialog window. */
+  openPluginManager: () => ipcRenderer.invoke('desktop:open-plugin-manager'),  /** Resolve an install address (URL or local path) into candidate plugin packages. */
+  resolvePlugin: (address) => ipcRenderer.invoke('desktop:plugin-resolve', address),
+  /** Install a plugin package by its local directory path. */
+  installPlugin: (path) => ipcRenderer.invoke('desktop:plugin-install', path),
+  /** List the profile's installed plugin bundles. */
+  listPlugins: () => ipcRenderer.invoke('desktop:plugin-list'),
+  /** Uninstall a plugin by its bundle package name. */
+  uninstallPlugin: (name) => ipcRenderer.invoke('desktop:plugin-uninstall', name),
+  /** Quit the application (used after plugin config changes). */
+  quitApp: () => ipcRenderer.invoke('desktop:quit'),
 })
 
 /** Sync the native title bar theme with the web app's data-ds-dark-theme attribute. */
