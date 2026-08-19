@@ -1,0 +1,16 @@
+CLAUDE.local.md
+.env
+node_modules/
+lib/
+*.tsbuildinfo
+pnpm-debug.log
+.pnpm-store/
+.cache/
+tmp/
+.vscode/
+.DS_Store
+.idea
+dist/
+runtime-host/
+resources/runtime-config.json
+upstream/

@@ -1,0 +1,91 @@
+{
+  "name": "@deepseek-ai/dsh-desktop",
+  "description": "DeepSeek Harness desktop application with tray-owned Host lifecycle",
+  "version": "0.1.0-rc.12",
+  "private": true,
+  "type": "module",
+  "main": "lib/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown",
+    "build:shell": "tsc -p tsconfig.json && tsdown",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "postinstall": "node scripts/prepare-upstream.mjs",
+    "prepare:upstream": "node scripts/prepare-upstream.mjs",
+    "dev": "pnpm run build:shell && electron .",
+    "dev:fast": "pnpm run build:shell && electron .",
+    "package": "pnpm run build:shell && electron-builder --dir",
+    "dist": "pnpm run build:shell && electron-builder",
+    "dist:win": "pnpm run build:shell && electron-builder --win nsis",
+    "package:fast": "pnpm run build:shell && electron-builder --dir",
+    "dist:fast": "pnpm run build:shell && electron-builder",
+    "dist:win:fast": "pnpm run build:shell && electron-builder --win nsis",
+    "publish:runtime": "node --import tsx scripts/publish-runtime.ts",
+    "sync:upstream": "node scripts/sync-upstream.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.3"
+  },
+  "build": {
+    "appId": "ai.deepseek.harness.desktop",
+    "productName": "DeepSeek Harness",
+    "electronDist": "node_modules/electron/dist",
+    "afterPack": "./scripts/verify-packaged-runtime.ts",
+    "asar": true,
+    "compression": "store",
+    "publish": {
+      "provider": "github",
+      "owner": "yxx-jf",
+      "repo": "deepseek-harness-desktop"
+    },
+    "files": [
+      "lib/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "desktop-resources"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": true,
+      "artifactName": "DeepSeek-Harness-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ]
+    },
+    "linux": {
+      "category": "Development",
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}

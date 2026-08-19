@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'">
+  <title>DeepSeek Harness</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      -webkit-app-region: drag;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 12px;
+      background: radial-gradient(130% 95% at 50% 28%, #111c38 0%, #0a0e1a 55%, #060913 100%);
+      color: #e8edf7;
+      font-family: system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      user-select: none; overflow: hidden;
+    }
+    .brand {
+      width: 92px; height: 92px; border-radius: 20px; object-fit: cover;
+      box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55);
+    }
+    .title { font-size: 34px; font-weight: 700; letter-spacing: 1px; }
+    .subtitle { font-size: 13px; font-weight: 500; letter-spacing: 9px; color: #93a3c4; margin-top: -8px; padding-left: 9px; }
+    .status { font-size: 13px; color: #b8c4dd; margin-top: 4px; }
+    .bar { width: 60%; height: 5px; border-radius: 3px; background: #1c2438; overflow: hidden; }
+    #progress-fill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #2f6bff, #5a8bff);
+      transition: width 0.15s ease;
+    }
+    #progress-percent { font-size: 24px; font-weight: 600; color: #8fb0ff; letter-spacing: 1px; }
+    #progress-detail {
+      font-size: 11px; color: #5f6c88;
+      max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      padding: 2px 14px;
+    }
+    #update-banner {
+      display: none; font-size: 12px; font-weight: 600; color: #ffd24d;
+      background: rgba(255, 210, 77, 0.08);
+      border: 1px solid rgba(255, 210, 77, 0.25);
+      border-radius: 14px; padding: 5px 16px; margin-top: 6px;
+      max-width: 86%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <img class="brand" src="splash-icon.png" alt="">
+  <div class="title">DeepSeek</div>
+  <div class="subtitle">H A R N E S S</div>
+  <div class="status" id="progress-label">正在启动…</div>
+  <div class="bar"><div id="progress-fill"></div></div>
+  <div id="progress-percent"></div>
+  <div id="progress-detail"></div>
+  <div id="update-banner"></div>
+</body>
+</html>

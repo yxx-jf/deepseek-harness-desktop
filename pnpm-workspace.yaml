@@ -1,0 +1,19 @@
+# Desktop-only workspace: this repository packages the DeepSeek Harness
+# desktop shell only. The Host runtime is downloaded at first launch from a
+# remote manifest, so the full upstream workspace is not needed to build.
+packages:
+  - '.'
+
+overrides:
+  # app-builder-lib 26.15.3 reads a cache-mode export introduced in 3.1.0,
+  # while its declared range still permits the incompatible 3.0.0 release.
+  'app-builder-lib@26.15.3>@electron/get': '3.1.0'
+
+# pnpm 10+ blocks any dependency shipping an install/build script until it is
+# explicitly reviewed here (strictDepBuilds defaults to true).
+allowBuilds:
+  # Electron downloads its runtime in postinstall; the desktop shell needs it.
+  electron: true
+  # electron-builder resolves the optional Squirrel target even though this app
+  # does not use it; the build script is harmless but we deny it explicitly.
+  electron-winstaller: false
