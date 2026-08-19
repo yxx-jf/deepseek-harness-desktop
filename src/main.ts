@@ -119,7 +119,9 @@ function isThemeSource(value: unknown): value is 'light' | 'dark' | 'system' {
  */
 function wireDesktopBridge(): void {
   ipcMain.handle('desktop:set-native-theme', (_event, source: unknown) => {
+    console.log(`[desktop] native theme set: ${String(source)}, shouldUseDarkColors=${nativeTheme.shouldUseDarkColors}`)
     if (isThemeSource(source)) nativeTheme.themeSource = source
+    console.log(`[desktop] after set: shouldUseDarkColors=${nativeTheme.shouldUseDarkColors}, themeSource=${nativeTheme.themeSource}`)
   })
 }
 
@@ -279,7 +281,37 @@ async function createMainWindow(): Promise<BrowserWindow> {
     if (isExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+  window.webContents.on('console-message', (_event, level, message) => {
+    if (message.startsWith('[desktop]')) console.log(`[renderer] ${message}`)
+  })
   await window.loadURL(origin)
+  // Inject theme observer: sync the native title bar with the web app's theme.
+  window.webContents.executeJavaScript(`(() => {
+    console.log('[desktop] theme observer injected, desktop api?=' + (typeof window.desktop !== 'undefined'))
+    const sync = () => {
+      const attr = document.body?.getAttribute('data-ds-dark-theme')
+      const isDark = attr === ''
+      console.log('[desktop] theme sync, attr=' + attr + ', body?=' + (document.body !== null) + ', api?=' + (typeof window.desktop !== 'undefined'))
+      if (typeof window.desktop !== 'undefined') {
+        window.desktop.setNativeTheme(isDark ? 'dark' : 'light').then(() => {
+          console.log('[desktop] setNativeTheme resolved')
+        }).catch((e) => {
+          console.log('[desktop] setNativeTheme rejected: ' + String(e))
+        })
+      } else {
+        console.log('[desktop] window.desktop missing')
+      }
+    }
+    sync()
+    try {
+      new MutationObserver(() => {
+        console.log('[desktop] mutation observed')
+        sync()
+      }).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+    } catch (e) {
+      console.log('[desktop] observer error: ' + String(e))
+    }
+  })()`, true).then(() => console.log('[desktop] executeJavaScript resolved')).catch((e) => console.log('[desktop] executeJavaScript rejected: ' + String(e)))
   if (!lifecycle?.isQuitting) window.show()
   return window
 }
