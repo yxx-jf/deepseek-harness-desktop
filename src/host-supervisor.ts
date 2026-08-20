@@ -258,6 +258,8 @@ export interface SpawnDshWebOptions {
   readonly env: NodeJS.ProcessEnv
   /** Run the Electron executable as its bundled Node runtime. */
   readonly electronRunAsNode?: boolean
+  /** Keep `dsh web` from opening the default browser (defaults to true). */
+  readonly noOpenBrowser?: boolean
 }
 
 function streamAdapter(stream: NodeJS.ReadableStream): HostChild['stdout'] {
@@ -280,7 +282,10 @@ export function spawnDshWeb(options: SpawnDshWebOptions): HostChild {
     ? { ...options.env, ELECTRON_RUN_AS_NODE: '1' }
     : options.env
 
-  const process = spawn(options.nodeExecutable, ['--expose-internals', options.cliEntry, 'web', '--host', '127.0.0.1', '--port', '0'], {
+  const args = ['--expose-internals', options.cliEntry, 'web', '--host', '127.0.0.1', '--port', '0']
+  if (options.noOpenBrowser !== false) args.push('--no-open')
+
+  const process = spawn(options.nodeExecutable, args, {
     cwd: options.cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],

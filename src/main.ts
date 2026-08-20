@@ -904,6 +904,7 @@ async function boot(): Promise<void> {
     host = createHostSupervisor({
       spawnHost: () => spawnDshWeb({
         ...paths,
+        noOpenBrowser: process.env.DSH_OPEN_BROWSER !== '1',
         env: {
           ...process.env,
           DSH_DESKTOP: '1',

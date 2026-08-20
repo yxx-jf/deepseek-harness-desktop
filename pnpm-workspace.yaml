@@ -17,3 +17,4 @@ allowBuilds:
   # electron-builder resolves the optional Squirrel target even though this app
   # does not use it; the build script is harmless but we deny it explicitly.
   electron-winstaller: false
+  esbuild: true
