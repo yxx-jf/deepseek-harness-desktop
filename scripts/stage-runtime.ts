@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { globSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { RUNTIME_EXCLUDED_PACKAGES } from './runtime-excludes.ts'
 
@@ -18,6 +18,15 @@ const deployRoot = resolve(desktopRoot, 'runtime')
 const deployPackage = '@deepseek-ai/dsh-desktop-runtime'
 const entry = join(staging, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
 const frontend = join(staging, 'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html')
+/**
+ * Manifest path for the upstream verify-runtime-closure gate, relative to the
+ * repository root the gate resolves against. Standalone layout: `runtime/package.json`
+ * beside the desktop root; monorepo layout: `apps/desktop/runtime/package.json`.
+ */
+const deployManifestRelative = relative(
+  repositoryRoot,
+  join(deployRoot, 'package.json'),
+).replaceAll(sep, '/')
 const workspaceState = join(repositoryRoot, 'node_modules/.pnpm-workspace-state-v1.json')
 const modulesYaml = join(repositoryRoot, 'node_modules/.modules.yaml')
 const fingerprintFile = join(staging, '.stage-fingerprint.json')
@@ -70,30 +79,41 @@ async function manifest(path: string): Promise<Manifest> {
   return JSON.parse(await readFile(path, 'utf8')) as Manifest
 }
 
-async function findSymlink(directory: string): Promise<string | undefined> {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name)
-    const metadata = await lstat(path)
-    if (metadata.isSymbolicLink()) return path
-    if (metadata.isDirectory()) {
-      const nested = await findSymlink(path)
-      if (nested !== undefined) return nested
+/** Collect every symlink path under root in one DFS pass (O(n) not O(n²)). */
+async function collectSymlinks(root: string): Promise<string[]> {
+  const links: string[] = []
+  const pending = [root]
+  while (pending.length > 0) {
+    const directory = pending.pop() as string
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      const metadata = await lstat(path)
+      if (metadata.isSymbolicLink()) links.push(path)
+      else if (metadata.isDirectory()) pending.push(path)
     }
   }
-  return undefined
+  return links
 }
 
 /** Replace every staged workspace-package symlink with its real bytes. */
 async function materializeLinks(): Promise<void> {
   const nodeModules = join(staging, 'node_modules')
-  for (let link = await findSymlink(nodeModules); link !== undefined; link = await findSymlink(nodeModules)) {
+  for (const link of await collectSymlinks(nodeModules)) {
     const segments = link.slice(nodeModules.length + 1).split(sep)
     const bin = segments.lastIndexOf('.bin')
     if (bin >= 0) {
       await rm(join(nodeModules, ...segments.slice(0, bin + 1)), { recursive: true, force: true })
       continue
     }
-    const source = await realpath(link)
+    let source: string
+    try {
+      source = await realpath(link)
+    } catch {
+      // Dangling link — its workspace source (e.g. the temporary deploy
+      // root) is gone, so there is nothing to preserve. Drop the link.
+      await rm(link, { recursive: true, force: true })
+      continue
+    }
     await rm(link, { recursive: true, force: true })
     await cp(source, link, {
       recursive: true,
@@ -111,7 +131,22 @@ async function restoreLegacyHoists(): Promise<void> {
     const destination = join(staging, 'node_modules', dependency)
     if (existsSync(destination)) continue
     const source = join(sourceModules, dependency)
-    if (!existsSync(source)) throw new Error(`desktop runtime dependency is missing after deploy: ${dependency}`)
+    if (!existsSync(source)) {
+      // The deploy may have skipped workspace packages that are not in the
+      // pnpm virtual store (e.g. because a mutated store entry broke their
+      // dependency chain).  Resolve them from the workspace source tree.
+      const workspacePkg = await resolveWorkspacePackage(dependency)
+      if (workspacePkg === undefined) {
+        throw new Error(`desktop runtime dependency is missing after deploy: ${dependency}`)
+      }
+      await mkdir(dirname(destination), { recursive: true })
+      await cp(workspacePkg, destination, {
+        recursive: true,
+        dereference: true,
+        filter: path => path !== join(workspacePkg, 'node_modules') && !path.startsWith(join(workspacePkg, 'node_modules') + sep),
+      })
+      continue
+    }
     await mkdir(dirname(destination), { recursive: true })
     await cp(source, destination, {
       recursive: true,
@@ -121,18 +156,65 @@ async function restoreLegacyHoists(): Promise<void> {
   }
 }
 
+/** Lazy-built map of workspace package names to their source directories. */
+let workspacePackageMap: Map<string, string> | undefined
+
+/**
+ * Find the source directory of a workspace package by its `package.json` name,
+ * scanning the repository root using the same globs as the deploy manifest.
+ * Returns `undefined` when the package is not a workspace member or its
+ * manifest is unreadable.
+ */
+async function resolveWorkspacePackage(packageName: string): Promise<string | undefined> {
+  if (workspacePackageMap === undefined) {
+    const map = new Map<string, string>()
+    for (const relative of globSync(workspaceManifestGlobs, { cwd: repositoryRoot }).sort()) {
+      const manifestPath = join(repositoryRoot, relative)
+      try {
+        const parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as { name?: string }
+        if (parsed.name !== undefined) map.set(parsed.name, dirname(manifestPath))
+      } catch {
+        // unreadable manifest → skip
+      }
+    }
+    workspacePackageMap = map
+  }
+  return workspacePackageMap.get(packageName)
+}
+
+/**
+ * Standalone layout ships the deploy manifest outside the upstream workspace
+ * (`runtime/package.json` beside the desktop root), so `pnpm --filter` cannot
+ * see it. Stage a temporary copy under a workspace glob that matches
+ * (`apps/*`) so pnpm can resolve its `workspace:*` closure, then clean up.
+ * Returns the deploy filter to use, or `undefined` when the manifest already
+ * lives inside the workspace (monorepo layout).
+ */
+function stagedDeployFilter(): { dir: string; filter: string } | undefined {
+  if (repositoryRoot === desktopRoot) return undefined
+  const dir = join(repositoryRoot, 'apps', 'dsh-runtime-deploy')
+  const filter = `./${relative(repositoryRoot, dir).replaceAll(sep, '/')}`
+  return { dir, filter }
+}
+
 async function deploy(): Promise<void> {
   // The deploy runs with `--config.node-linker=hoisted`, which rewrites the
   // workspace's own node_modules metadata; preserve both files so the next
   // pnpm command does not demand a from-scratch reinstall.
   const savedWorkspaceState = existsSync(workspaceState) ? await readFile(workspaceState) : undefined
   const savedModulesYaml = existsSync(modulesYaml) ? await readFile(modulesYaml) : undefined
+  const staged = stagedDeployFilter()
+  if (staged !== undefined) {
+    await mkdir(staged.dir, { recursive: true })
+    await cp(join(deployRoot, 'package.json'), join(staged.dir, 'package.json'))
+  }
   try {
     await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', [
-      '--config.verify-deps-before-run=false', '--filter', deployPackage, 'deploy', '--legacy', '--prod',
+      '--config.verify-deps-before-run=false', '--filter', staged?.filter ?? deployPackage, 'deploy', '--legacy', '--prod',
       '--config.node-linker=hoisted', '--config.auto-install-peers=false', '--config.link-workspace-packages=true', staging,
     ])
   } finally {
+    if (staged !== undefined) await rm(staged.dir, { recursive: true, force: true })
     if (savedWorkspaceState === undefined) await rm(workspaceState, { force: true })
     else await writeFile(workspaceState, savedWorkspaceState)
     if (savedModulesYaml === undefined) await rm(modulesYaml, { force: true })
@@ -142,7 +224,7 @@ async function deploy(): Promise<void> {
     // cannot resolve package-local devDependencies. Re-link it after restoring
     // the metadata; best-effort so a deploy failure is not masked.
     try {
-      await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['install'])
+      await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['install', '--no-frozen-lockfile'])
     } catch (error) {
       console.warn(`desktop runtime staging: workspace re-link failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -267,7 +349,7 @@ async function main(): Promise<void> {
   await run(process.execPath, ['--import', 'tsx', join(desktopRoot, 'scripts/generate-runtime-manifest.ts')])
   await run(process.execPath, [
     '--import', 'tsx', 'scripts/verify-runtime-closure.ts',
-    '--manifest', 'apps/desktop/runtime/package.json',
+    '--manifest', deployManifestRelative,
   ])
   const fingerprint = await computeFingerprint()
   const stored = await readFingerprint()
@@ -279,6 +361,10 @@ async function main(): Promise<void> {
     await deploy()
     await restoreLegacyHoists()
     await materializeLinks()
+    // The flat hoisted layout has no .pnpm virtual store, but a stale one
+    // from a prior non-hoisted deploy would inflate the archive beyond the
+    // ZIP central directory's 16-bit entry count (65 535).  Drop it if present.
+    await rm(join(staging, 'node_modules', '.pnpm'), { recursive: true, force: true })
     const pruned = await pruneRuntime()
     await writeFile(fingerprintFile, JSON.stringify({ version: STAGE_CACHE_VERSION, hash: fingerprint }, undefined, 2))
     console.log(`desktop runtime staged at ${staging} (pruned ${pruned.files} files, ${(pruned.bytes / 1024 / 1024).toFixed(1)} MB)`)
