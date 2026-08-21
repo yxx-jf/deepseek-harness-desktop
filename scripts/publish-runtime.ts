@@ -13,7 +13,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { readdir, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { zipSync } from 'fflate'
@@ -129,6 +129,17 @@ async function createRuntimeArchive(sourceRoot: string, outFile: string): Promis
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
   await runStageRuntime()
+
+  // Purge stale outputs from previous runs: content-addressed archive names
+  // change between builds, so the output dir must hold only the current
+  // zip + manifest or an uploader may ship a stale zip mismatching the manifest.
+  await rm(join(options.outDir, 'runtime-manifest.json'), { force: true })
+  for (const entry of await readdir(options.outDir).catch(() => [])) {
+    if (entry.startsWith('dsh-runtime-') && entry.endsWith('.zip')) {
+      await rm(join(options.outDir, entry), { force: true, recursive: false })
+    }
+  }
+
   if (!existsSync(hostEntry)) {
     throw new Error(`publish-runtime: staged Host entry is missing: ${hostEntry}`)
   }

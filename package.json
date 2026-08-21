@@ -71,7 +71,7 @@
       "oneClick": false,
       "perMachine": false,
       "allowElevation": false,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "artifactName": "DeepSeek-Harness-${version}-${arch}.${ext}"
     },
     "mac": {

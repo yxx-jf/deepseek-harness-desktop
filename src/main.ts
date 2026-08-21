@@ -115,6 +115,20 @@ function preloadPath(): string {
     : join(DESKTOP_DIR, 'resources/preload.cjs')
 }
 
+/** Path of the plugin-manager preload, from the checkout in development or desktop-resources when packaged. */
+function pluginManagerPreloadPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'desktop-resources/plugin-manager-preload.cjs')
+    : join(DESKTOP_DIR, 'resources/plugin-manager-preload.cjs')
+}
+
+/** Path of the plugin-manager HTML, from the checkout in development or desktop-resources when packaged. */
+function pluginManagerHtmlPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'desktop-resources/plugin-manager.html')
+    : join(DESKTOP_DIR, 'resources/plugin-manager.html')
+}
+
 /** Accept one of the three theme-source values electron-updater's nativeTheme understands. */
 function isThemeSource(value: unknown): value is 'light' | 'dark' | 'system' {
   return value === 'light' || value === 'dark' || value === 'system'
@@ -267,7 +281,7 @@ function wireDesktopBridge(): void {
  */
 function appUpdateFeedUrl(): string | undefined {
   if (!app.isPackaged) return undefined
-  return process.env.DSH_APP_UPDATE_URL ?? 'https://github.akams.cn/https://github.com/yxx-jf/deepseek-harness-desktop/releases/download/v0.1.0-rc.12/'
+  return process.env.DSH_APP_UPDATE_URL ?? 'https://gh-proxy.com/https://github.com/yxx-jf/deepseek-harness-desktop/releases/download/v0.1.0-rc.12/'
 }
 
 /**
@@ -302,9 +316,9 @@ async function resolveHostPaths(splash: SplashSurface | undefined, skipRuntimeUp
     // Flaky links to release CDNs stall mid-stream; abort a stalled attempt
     // and retry, then fall back to mirror prefixes that prepend to the
     // archive URL (the manifest SHA-256 gates every attempt).
-    downloadStallTimeoutMs: 20_000,
+    downloadStallTimeoutMs: 60_000,
     downloadRetries: 1,
-    mirrorPrefixes: (process.env.DSH_RUNTIME_MIRRORS ?? 'https://github.akams.cn/')
+    mirrorPrefixes: (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
       .split(',')
       .map(mirror => mirror.trim())
       .filter(mirror => mirror.length > 0),
@@ -447,7 +461,6 @@ function githubMirrorPrefixes(): string[] {
     'https://ghfast.top/',
     'https://gh-proxy.com/',
     'https://ghproxy.net/',
-    'https://github.akams.cn/',
   ]
 }
 
@@ -736,14 +749,14 @@ function openPluginManager(): void {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      preload: join(DESKTOP_DIR, 'resources/plugin-manager-preload.cjs'),
+      preload: pluginManagerPreloadPath(),
     },
   })
   managerWindow = manager
   manager.on('closed', () => {
     if (managerWindow === manager) managerWindow = undefined
   })
-  void manager.loadFile(join(DESKTOP_DIR, 'resources/plugin-manager.html')).then(() => {
+  void manager.loadFile(pluginManagerHtmlPath()).then(() => {
     if (!manager.isDestroyed()) manager.show()
   })
 }
@@ -957,7 +970,7 @@ async function checkRuntimeForUpdates(): Promise<void> {
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return
   const runtimeDir = join(app.getPath('userData'), 'host')
-  const mirrors = (process.env.DSH_RUNTIME_MIRRORS ?? 'https://github.akams.cn/')
+  const mirrors = (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
     .split(',')
     .map(mirror => mirror.trim())
     .filter(mirror => mirror.length > 0)

@@ -11,7 +11,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { readdir, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -100,18 +100,17 @@ async function getOrCreateRelease(version: string, tag: string): Promise<number>
   return release.id as number
 }
 
-async function uploadAsset(token: string, releaseId: number, filePath: string): Promise<void> {
+async function uploadAsset(token: string, releaseId: number, filePath: string, deletePrefix?: string): Promise<void> {
   const fileName = filePath.split(/[/\\]/).pop()!
   console.log(`  📤 上传: ${fileName}...`)
 
-  // Delete existing asset with same name
+  // Delete existing asset with same name, or matching prefix (e.g. old runtime zips with different hash)
   try {
     const assets = await curlJson([`https://api.github.com/repos/${REPO}/releases/${releaseId}/assets`])
     for (const asset of (assets as Array<{ id: number; name: string }>)) {
-      if (asset.name === fileName) {
-        console.log(`  删除旧资产: ${fileName}...`)
+      if (asset.name === fileName || (deletePrefix !== undefined && asset.name.startsWith(deletePrefix))) {
+        console.log(`  删除旧资产: ${asset.name}...`)
         await exec(`curl.exe -s -X DELETE -H "Authorization: Bearer ${token}" -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${REPO}/releases/assets/${asset.id}"`)
-        break
       }
     }
   } catch {
@@ -143,7 +142,11 @@ async function main(): Promise<void> {
   await run('pnpm', ['run', 'build:shell'])
 
   // Step 2: Stage runtime and generate publish artifacts
+  // Clean previous runtime output to avoid stale zips with different hashes.
+  // Node's fs.rm replaces shell `rm -rf`, which is unreliable on Windows cmd.exe.
   console.log('\n=== 2/4 生成运行时产物 ===')
+  const runtimeDir = join(ROOT, 'dist', 'runtime')
+  await rm(runtimeDir, { recursive: true, force: true })
   const baseUrl = `https://github.com/${REPO}/releases/download/${tag}`
   await run('pnpm', ['run', 'publish:runtime', '--url', baseUrl, '--write-config'])
 
@@ -172,9 +175,23 @@ async function main(): Promise<void> {
     join(ROOT, 'dist', 'runtime', 'runtime-manifest.json'),
   ]
 
-  // Find runtime zip
-  const runtimeDir = join(ROOT, 'dist', 'runtime')
-  if (existsSync(runtimeDir)) {
+  // Find runtime zip — match the hash from the manifest to avoid stale zips
+  const manifestPath = join(runtimeDir, 'runtime-manifest.json')
+  let expectedZipName: string | undefined
+  if (existsSync(manifestPath)) {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { url?: string }
+    if (manifest.url !== undefined) {
+      expectedZipName = manifest.url.split('/').pop()
+    }
+  }
+  if (existsSync(runtimeDir) && expectedZipName !== undefined) {
+    const filePath = join(runtimeDir, expectedZipName)
+    if (existsSync(filePath)) {
+      files.push(filePath)
+    } else {
+      console.warn(`  ⚠️ manifest 指向的运行时 zip 不存在: ${expectedZipName}`)
+    }
+  } else if (existsSync(runtimeDir)) {
     for (const file of await readdir(runtimeDir)) {
       if (file.startsWith('dsh-runtime-') && file.endsWith('.zip')) {
         files.push(join(runtimeDir, file))
@@ -188,7 +205,10 @@ async function main(): Promise<void> {
       console.warn(`  ⚠️ 文件不存在，跳过: ${filePath}`)
       continue
     }
-    await uploadAsset(token, releaseId, filePath)
+    // runtime zips are content-addressed (dsh-runtime-<version>-<hash>.zip); the
+    // hash changes between builds, so also purge stale zips of this version
+    const deletePrefix = filePath.includes('dsh-runtime-') ? `dsh-runtime-${version}-` : undefined
+    await uploadAsset(token, releaseId, filePath, deletePrefix)
   }
 
   console.log(`\n🎉 发布完成!`)
