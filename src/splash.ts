@@ -14,7 +14,7 @@ export interface SplashSurface {
   setMessage(message: string): void
   /** Set download progress percentage (0-100) for the app-update surface. */
   setProgress(percent: number): void
-  /** The native window, for parenting modal dialogs above the always-on-top splash. */
+  /** The native window, for parenting progress dialogs over the splash. */
   getWindow(): BrowserWindow
   /** Destroy the window. */
   close(): void
@@ -61,7 +61,10 @@ export function createSplashWindow(htmlPath: string): SplashSurface {
     hasShadow: true,
     resizable: false,
     show: false,
-    alwaysOnTop: true,
+    // Keep the splash below other apps' windows: an always-on-top window
+    // would cover the software the user switches to while the runtime
+    // downloads. Parent dialog windows stay in front via setParentWindow.
+    alwaysOnTop: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

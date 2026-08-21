@@ -773,6 +773,13 @@ async function createMainWindow(): Promise<BrowserWindow> {
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = undefined
   })
+  // The loaded dsh web page sets its own <title> (which leaks build labels
+  // like "… build …"); lock the window title to the product name so no
+  // internal build string shows in the title bar or task switcher.
+  window.on('page-title-updated', (event) => {
+    event.preventDefault()
+    window.setTitle(APP_NAME)
+  })
   window.webContents.on('will-navigate', (event, url) => {
     if (hasOrigin(url, origin)) return
     event.preventDefault()
