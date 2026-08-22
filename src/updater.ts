@@ -106,9 +106,20 @@ export function checkAppUpdate(notifyWhenCurrent = false): Promise<AppUpdateDeci
     let settled = false
     let detach: () => void = () => {}
 
+    // If the upstream feed is unreachable (slow network, proxy, or server
+    // error), the check may hang without emitting any event. A timeout
+    // prevents the splash from being stuck on "正在检查更新…" forever.
+    const timeout = setTimeout(() => {
+      console.warn('desktop update check timed out; proceeding with startup')
+      settled = true
+      detach()
+      resolve('none')
+    }, 10_000)
+
     const settle = (decision: AppUpdateDecision): void => {
       if (settled) return
       settled = true
+      clearTimeout(timeout)
       detach()
       resolve(decision)
     }

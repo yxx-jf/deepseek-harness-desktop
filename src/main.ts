@@ -96,7 +96,9 @@ function packagedManifestUrl(): string | undefined {
   if (!existsSync(configPath)) return undefined
   const config = JSON.parse(readFileSync(configPath, 'utf8')) as { manifestUrl?: unknown }
   if (typeof config.manifestUrl !== 'string' || config.manifestUrl.length === 0) {
-    throw new Error(`desktop runtime config has no manifestUrl: ${configPath}`)
+    // An empty/absent remote config means the bundled runtime is authoritative
+    // (full/offline installer). Fall back to resources/host instead of failing.
+    return undefined
   }
   return config.manifestUrl
 }
@@ -285,6 +287,67 @@ function appUpdateFeedUrl(): string | undefined {
 }
 
 /**
+ * Set proxy bypass rules on the default session so the runtime download
+ * uses the default `net.fetch` (no custom stream conversion). System proxies
+ * on Windows often return HTTP 502 for GitHub release downloads, making
+ * every candidate fail. Bypassing the proxy for GitHub hosts lets the
+ * download go through the direct (fast) path.
+ */
+async function setupRuntimeDownloadProxy(): Promise<void> {
+  try {
+    await session.defaultSession.setProxy({
+      proxyBypassRules: 'github.com,*.github.com,*.githubusercontent.com,gh-proxy.com',
+    })
+  } catch {
+    // Non-fatal: proxy bypass is best-effort; without it the download may
+    // still succeed through a mirror that works with the system proxy.
+  }
+}
+
+/**
+ * Probe a download URL for its achievable speed by downloading a small
+ * chunk and measuring the throughput. Returns bytes per second, or 0 when
+ * the URL is unreachable or returns a non-2xx status.
+ */
+async function probeDownloadSpeed(fetchImpl: typeof fetch, url: string, probeBytes = 1_048_576): Promise<number> {
+  const start = Date.now()
+  try {
+    const response = await fetchImpl(url, { redirect: 'follow' })
+    if (!response.ok || response.body === null) return 0
+    const reader = response.body.getReader()
+    let received = 0
+    while (received < probeBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+      received += value.length
+    }
+    reader.cancel()
+    const elapsed = Date.now() - start
+    return elapsed > 0 ? Math.round(received / (elapsed / 1000)) : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Rank all download candidates (primary URL + mirrors) by measured speed,
+ * fastest first. The caller passes the sorted list to ensureRuntime so the
+ * fastest path is tried first. A probe that fails (0 B/s) lands at the end
+ * as a fallback.
+ */
+async function rankMirrorsBySpeed(fetchImpl: typeof fetch, manifestUrl: string, mirrors: readonly string[]): Promise<string[]> {
+  const candidates = [manifestUrl, ...mirrors.map(m => `${m}${manifestUrl}`)]
+  const results: Array<{ url: string; speed: number }> = []
+  for (const url of candidates) {
+    const speed = await probeDownloadSpeed(fetchImpl, url)
+    console.log(`desktop runtime download probe: ${url} → ${speed} B/s`)
+    results.push({ url, speed })
+  }
+  results.sort((a, b) => b.speed - a.speed)
+  return results.map(r => r.url)
+}
+
+/**
  * Resolve the Host paths for this launch. In development the checkout is the
  * runtime. Packaged, the bundled runtime is authoritative unless a remote
  * manifest URL is configured, in which case the runtime is bootstrapped into
@@ -303,25 +366,25 @@ async function resolveHostPaths(splash: SplashSurface | undefined, skipRuntimeUp
   }
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return hostPaths(join(process.resourcesPath, 'host'))
+
+  // Bypass the system proxy for GitHub hosts — many proxies return 502 for
+  // release downloads, which kills every candidate before the mirror is tried.
+  await setupRuntimeDownloadProxy()
+
   const runtimeDir = join(app.getPath('userData'), 'host')
+  const mirrorPrefixes = (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
+      .split(',')
+      .map(mirror => mirror.trim())
+      .filter(mirror => mirror.length > 0)
+  const candidates = await rankMirrorsBySpeed((input, init) => net.fetch(input instanceof URL ? input.href : input, init), manifestUrl, mirrorPrefixes)
   const outcome = await ensureRuntime({
     manifestUrl,
     runtimeDir,
     hostEntry: HOST_ENTRY,
-    // Chromium's network stack (Electron net.fetch) validates certificates
-    // against the OS store and honors system proxy settings. Node's bundled
-    // CA fetch rejects machines with locally installed roots (intercepting
-    // proxies, security suites), so the runtime download must not use it.
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
-    // Flaky links to release CDNs stall mid-stream; abort a stalled attempt
-    // and retry, then fall back to mirror prefixes that prepend to the
-    // archive URL (the manifest SHA-256 gates every attempt).
     downloadStallTimeoutMs: 60_000,
     downloadRetries: 1,
-    mirrorPrefixes: (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
-      .split(',')
-      .map(mirror => mirror.trim())
-      .filter(mirror => mirror.length > 0),
+    candidates,
     // Parallel workers inflate and write concurrently; the serial path is
     // the fallback for archives or environments the parallel path cannot
     // handle (the serial extractor re-creates the destination first).

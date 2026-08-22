@@ -1,0 +1,7 @@
+const fs = require('fs')
+const path = require('path')
+const out = path.resolve(__dirname, '..', 'out_send.txt')
+fs.writeFileSync(out, 'node ' + process.version + '\n')
+fs.writeFileSync(out, 'process.send type (spawned WITHOUT ipc): ' + typeof process.send + '\n', { flag: 'a' })
+fs.writeFileSync(out, 'ELECTRON_RUN_AS_NODE: ' + process.env.ELECTRON_RUN_AS_NODE + '\n', { flag: 'a' })
+fs.writeFileSync(out, 'process.execPath: ' + process.execPath + '\n', { flag: 'a' })

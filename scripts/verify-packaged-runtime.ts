@@ -1,9 +1,13 @@
 /** Reject a packaged desktop shell that has neither a bundled nor a configured runtime. */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, cpSync, existsSync } from 'node:fs'
 import { access } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { AfterPackContext } from 'electron-builder'
+
+const DESKTOP_ROOT = resolve(fileURLToPath(import.meta.url), '..', '..')
+const RUNTIME_HOST_DIR = resolve(DESKTOP_ROOT, 'runtime-host')
 
 const REQUIRED_HOST_FILES = [
   ['@deepseek-ai', 'dsh', 'lib', 'bin.js'],
@@ -22,12 +26,23 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
   const resources = context.electronPlatformName === 'darwin'
     ? join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources')
     : join(context.appOutDir, 'resources')
-  const bundledHost = join(resources, 'host', 'node_modules')
-  try {
-    await access(bundledHost)
-  } catch {
-    // No bundled runtime: the remote path must be configured so first launch
-    // can download one. Rejecting here keeps a broken installer from shipping.
+  const hostDir = join(resources, 'host')
+  const bundledHost = join(hostDir, 'node_modules')
+
+  // Copy the staged runtime into the packaged app when it isn't bundled yet.
+  // electron-builder's extraResources filters out node_modules, so we do the
+  // copy here in the afterPack hook where we control the exact files.
+  if (await access(bundledHost).then(() => true).catch(() => false)) {
+    // Already bundled; verify expected files.
+    for (const segments of REQUIRED_HOST_FILES) {
+      await access(join(bundledHost, ...segments))
+    }
+    return
+  }
+
+  // No bundled runtime yet — copy from the staged source.
+  if (!existsSync(RUNTIME_HOST_DIR)) {
+    // Fall back to remote config.
     const configPath = join(resources, 'desktop-resources', 'runtime-config.json')
     const config = JSON.parse(readFileSync(configPath, 'utf8')) as { manifestUrl?: unknown }
     if (typeof config.manifestUrl !== 'string' || config.manifestUrl.length === 0) {
@@ -38,6 +53,30 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
     }
     return
   }
+
+  // Patch the native picker first (worker IPC stdout fallback for Electron's node mode).
+  const { patchNativePicker } = await import('./patch-native-picker.mjs')
+  patchNativePicker(RUNTIME_HOST_DIR)
+
+  // Patch the UI brand label from "DSH Local Build" / any prior residue to
+  // the official product name "DeepSeek Harness".
+  for (const file of ['dsh-client-ui-sidebar/lib/client.js', 'dsh-client-ui-renderer/lib/client.js']) {
+    const p = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', file)
+    if (existsSync(p)) {
+      const text = readFileSync(p, 'utf8')
+      // Handle both the pristine fallback and a previously applied lower-case
+      // variant so the label always converges on the correct casing.
+      let patched = text.replaceAll('DSH Local Build', 'DeepSeek Harness')
+      patched = patched.replaceAll('deepseek harness', 'DeepSeek Harness')
+      if (patched !== text) {
+        writeFileSync(p, patched)
+        console.log(`afterPack: patched brand label in ${file}`)
+      }
+    }
+  }
+
+  console.log(`afterPack: copying runtime-host to ${hostDir}`)
+  cpSync(RUNTIME_HOST_DIR, hostDir, { recursive: true, dereference: true })
   for (const segments of REQUIRED_HOST_FILES) {
     await access(join(bundledHost, ...segments))
   }

@@ -77,6 +77,12 @@ export interface RuntimeBootstrapOptions {
    */
   readonly mirrorPrefixes?: readonly string[]
   /**
+   * Pre-sorted download candidate URLs (fastest first). When provided,
+   * overrides the [manifest.url, ...mirrorPrefixes] ordering so the
+   * fastest path is tried first instead of the built-in primary + mirrors.
+   */
+  readonly candidates?: readonly string[]
+  /**
    * Skip the update check and use the installed runtime as-is. An absent
    * install still bootstraps (the app cannot run without a Host); a present
    * one is trusted without consulting the manifest.
@@ -392,7 +398,7 @@ export async function ensureRuntime(options: RuntimeBootstrapOptions): Promise<B
       timeoutMs: options.downloadTimeoutMs ?? 300_000,
       stallTimeoutMs: options.downloadStallTimeoutMs ?? 20_000,
     }
-    const candidates = [
+    const candidates = options.candidates ?? [
       manifest.url,
       ...(options.mirrorPrefixes ?? []).map(prefix => `${prefix}${manifest.url}`),
     ]
