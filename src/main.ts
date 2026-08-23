@@ -968,6 +968,19 @@ async function boot(): Promise<void> {
       }
     },
   }, appUpdateFeedUrl())
+  // Start a poller that opens files the Host (ELECTRON_RUN_AS_NODE child)
+  // writes to a temp file.  The Host's children cannot spawn visible GUI
+  // windows (hidden window station issue), so the main process does it.
+  const OPEN_DOC_TMP = join(process.env.TEMP ?? process.env.TMP ?? '', 'dsh-open-doc.txt')
+  const openDocTimer = setInterval(() => {
+    try {
+      const p = readFileSync(OPEN_DOC_TMP, 'utf8').trim()
+      if (p.length > 0) {
+        writeFileSync(OPEN_DOC_TMP, '')
+        void shell.openPath(p)
+      }
+    } catch { /* file missing or empty — nothing to open */ }
+  }, 800)
   // Serial update sequence: decide the app update first, then the runtime.
   // Accepting or declining the app update skips the runtime check this launch
   // — an accepted install relaunches the app, and that relaunch (now up to
