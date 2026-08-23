@@ -2,8 +2,8 @@
  * (subscriptions + activation). Talks to the main process through the
  * sandboxed preload bridge (window.desktop).
  *
- * Community tab pre-scans GitHub repos for valid dsh.bundle before showing,
- * so only real DSH plugins appear.
+ * Community tab shows search results and asynchronously verifies dsh.bundle
+ * for each repo, adding a badge on verified ones without blocking the list. */
  */
 
 /* ─────────────────────── Theme sync ────────────────────── */
@@ -94,23 +94,6 @@ function errorBox(text) {
 
 /* ─────────────────────── GitHub browse (community) ────────────────────── */
 
-/** Quick check whether a GitHub repo has a valid dsh.bundle in its package.json.
- *  Runs in the main process with the same direct+mirror strategy as the search,
- *  so mainland networks work. If the check itself is unreachable we are lenient
- *  (keep the repo) instead of wrongly hiding it. */
-async function hasDshBundle(repo) {
-  try {
-    const result = await api.checkBundle(repo.fullName, repo.defaultBranch)
-    if (result.ok) {
-      if (result.reachable) return result.verified
-      return true // 无法验证（网络不可达）时放行，避免误杀
-    }
-    return true
-  } catch {
-    return true
-  }
-}
-
 let searchTimer = null
 /** Wrap an IPC promise with a hard timeout so a stalled fetch can't hang the UI. */
 function withTimeout(promise, ms, label) {
@@ -131,15 +114,9 @@ function refreshBrowse() {
       const result = await withTimeout(api.searchPlugins('community', query), 15000, '搜索请求')
       const elapsed = ((Date.now() - started) / 1000).toFixed(1)
       if (!result.ok) { errorBox(result.error || '搜索失败'); diag('搜索失败：' + (result.error || ''), 'err'); return }
-      // Pre-scan each repo for a valid dsh.bundle before showing.
-      diag('正在验证插件有效性…')
-      const valid = []
-      for (const repo of (result.repos || [])) {
-        const ok = await hasDshBundle(repo)
-        if (ok) valid.push(repo)
-      }
-      diag('搜索完成（' + elapsed + 's），找到 ' + valid.length + ' 个有效插件', 'ok')
-      renderRepos(valid)
+      const repos = result.repos || []
+      diag('搜索完成（' + elapsed + 's），找到 ' + repos.length + ' 个仓库。已验证的插件会显示「已验证」标记', 'ok')
+      renderRepos(repos)
     } catch (e) {
       diag('加载失败：' + String(e), 'err')
       errorBox('加载失败：' + String(e) + '。请检查网络后重试。')
@@ -149,7 +126,7 @@ function refreshBrowse() {
 
 function renderRepos(repos) {
   if (!Array.isArray(repos) || repos.length === 0) {
-    showEmpty('没有找到有效插件。试试其他关键词？')
+    showEmpty('没有搜索到插件。试试其他关键词？')
     return
   }
   els.list.innerHTML = ''
@@ -194,7 +171,23 @@ function renderRepos(repos) {
     row.appendChild(info)
     row.appendChild(actions)
     els.list.appendChild(row)
+
+    // 异步验证 dsh.bundle，不阻塞显示
+    verifyBundle(repo, row)
   }
+}
+
+/** 异步检查仓库是否有 dsh.bundle，有则添加「已验证」标记。 */
+async function verifyBundle(repo, row) {
+  try {
+    const result = await api.checkBundle(repo.fullName, repo.defaultBranch)
+    if (result.ok && result.reachable && result.verified) {
+      const badge = document.createElement('span')
+      badge.className = 'status enabled'
+      badge.textContent = '✓ 已验证'
+      row.querySelector('.name').appendChild(badge)
+    }
+  } catch { /* 静默失败，不阻塞 UI */ }
 }
 
 async function subscribeRepo(repo, btn) {
