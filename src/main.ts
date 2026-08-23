@@ -136,23 +136,6 @@ function isThemeSource(value: unknown): value is 'light' | 'dark' | 'system' {
   return value === 'light' || value === 'dark' || value === 'system'
 }
 
-/** Ensure the web profile includes the file-based settings provider. */
-function ensureWebProfileSettingsFile(): void {
-  const profilePkgPath = join(WEB_PROFILE_DIR, 'package.json')
-  if (!existsSync(profilePkgPath)) return
-  try {
-    const profilePkg = JSON.parse(readFileSync(profilePkgPath, 'utf8')) as { dsh?: { profile?: { bundles?: string[] } } }
-    const bundles = profilePkg.dsh?.profile?.bundles
-    if (Array.isArray(bundles) && !bundles.includes('@deepseek-ai/dsh-settings-file')) {
-      bundles.push('@deepseek-ai/dsh-settings-file')
-      writeFileSync(profilePkgPath, JSON.stringify(profilePkg, null, 2) + '\n')
-      console.log('desktop: added @deepseek-ai/dsh-settings-file to web profile bundles')
-    }
-  } catch (error) {
-    console.error('desktop: failed to patch web profile bundles:', error)
-  }
-}
-
 /**
  * Wire the renderer's optional desktop bridge: mirror the app theme onto the
  * native chrome. `nativeTheme.themeSource` drives Windows title-bar dark
@@ -1005,9 +988,6 @@ async function boot(): Promise<void> {
   try {
     const paths = await resolveHostPaths(splash, skipRuntimeUpdate)
     assertHostArtifacts(paths)
-    // Ensure the web profile includes the file-based settings provider so the
-    // "open config file" button in the settings UI works.
-    ensureWebProfileSettingsFile()
     host = createHostSupervisor({
       spawnHost: () => spawnDshWeb({
         ...paths,
