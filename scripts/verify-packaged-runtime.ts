@@ -76,27 +76,29 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
   }
 
   // Patch the native path opener so that .yaml/.yml/.json files (which
-  // commonly have no file association on Windows) are opened with Notepad,
-  // launched via spawn+detached so the openDocument request neither hangs on
-  // a long-lived GUI process nor fails silently in the ELECTRON_RUN_AS_NODE
-  // child-process context (execFile and Start-Process both misbehave there).
+  // commonly have no file association on Windows) show the "Open With" dialog
+  // via rundll32 shell32.dll,OpenAs_RunDLL.  This is the most reliable way to
+  // let the user choose an editor regardless of the calling process context
+  // (ELECTRON_RUN_AS_NODE, etc.) and does not wait for the editor to exit.
   const openerPath = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'types', 'native-path-opener.js')
   if (existsSync(openerPath)) {
     const text = readFileSync(openerPath, 'utf8')
-    // If the final patch is absent, converge any previous form (pristine
-    // Invoke-Item, blocking notepad, Start-Process) to the spawn+detached one.
-    const marker = "spawn('notepad.exe'"
+    // If the final patch is absent, converge any previous form to the
+    // rundll32 OpenAs_RunDLL one.
+    const marker = 'OpenAs_RunDLL'
     if (!text.includes(marker)) {
-      // (Pristine) function body without the extension special-case.
+      // Forms from oldest to newest:
       const pristineFn = 'async function openWindowsPath(path, signal, run) {\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      // (Intermediate) blocking notepad spawn.
       const blockingFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'notepad.exe\', [path], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      // (Previous patch) Start-Process fire-and-forget.
-      const startProcessFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Fire-and-forget: the editor is a long-lived GUI process; waiting on\n        // it would hang the openDocument request until the user closes it.\n        await run(\'powershell.exe\', [\n            \'-NoProfile\',\n            \'-Command\',\n            \`Start-Process -FilePath notepad.exe -ArgumentList \${powershellLiteral(path)}\`,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      const finalFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Spawn notepad detached so the parent (Host) does not wait for the\n        // GUI editor to close.  execFile & Start-Process both fail silently\n        // in the ELECTRON_RUN_AS_NODE child-process context; spawn+detached\n        // works reliably.\n        const { spawn } = await import(\'node:child_process\');\n        const child = spawn(\'notepad.exe\', [path], { detached: true, stdio: \'ignore\' });\n        child.unref();\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      const oldBody = text.includes(startProcessFn) ? startProcessFn
-        : (text.includes(blockingFn) ? blockingFn
-          : (text.includes(pristineFn) ? pristineFn : undefined))
+      const startProcessFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'powershell.exe\', [\n            \'-NoProfile\',\n            \'-Command\',\n            \`Start-Process -FilePath notepad.exe -ArgumentList \${powershellLiteral(path)}\`,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const spawnFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        const { spawn } = await import(\'node:child_process\');\n        const child = spawn(\'notepad.exe\', [path], { detached: true, stdio: \'ignore\' });\n        child.unref();\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const cmdStartFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        const { exec } = await import(\'node:child_process\');\n        exec(\'start "" "\' + path + \'"\', { windowsHide: true });\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const finalFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Show the Windows "Open With" dialog so the user can choose which\n        // editor to use.  rundll32 OpenAs_RunDLL reliably pops the dialog\n        // regardless of the calling process context (ELECTRON_RUN_AS_NODE, etc.)\n        // and does not wait for the chosen editor to exit.\n        await run(\'rundll32.exe\', [\n            \'shell32.dll,OpenAs_RunDLL\',\n            path,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const oldBody = text.includes(cmdStartFn) ? cmdStartFn
+        : (text.includes(spawnFn) ? spawnFn
+          : (text.includes(startProcessFn) ? startProcessFn
+            : (text.includes(blockingFn) ? blockingFn
+              : (text.includes(pristineFn) ? pristineFn : undefined))))
       if (oldBody !== undefined) {
         writeFileSync(openerPath, text.replace(oldBody, finalFn))
         console.log('afterPack: patched native-path-opener for text file types')
