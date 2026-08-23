@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('desktop', {
   uninstallPlugin: (name) => ipcRenderer.invoke('desktop:plugin-uninstall', name),
   /** Quit the application (used after plugin config changes). */
   quitApp: () => ipcRenderer.invoke('desktop:quit'),
+  /** Open the DSH settings document (bypasses the Host API so the main-process window station is used). */
+  openDocument: () => ipcRenderer.invoke('desktop:open-document'),
 })
 
 /** Sync the native title bar theme with the web app's data-ds-dark-theme attribute. */

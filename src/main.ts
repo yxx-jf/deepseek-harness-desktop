@@ -906,9 +906,26 @@ async function createMainWindow(): Promise<BrowserWindow> {
         btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.06)' })
         actions.appendChild(btn)
       }
+      // Override the "打开配置文件" button to call the main-process opener
+      // (bypasses the Host API entirely, avoiding the hidden window-station issue).
+      const overrideOpenDoc = () => {
+        const buttons = document.querySelectorAll('button')
+        for (const button of buttons) {
+          if (button.textContent?.trim() === '打开配置文件' && !button.getAttribute('data-dsh-overridden')) {
+            button.setAttribute('data-dsh-overridden', 'true')
+            button.addEventListener('click', (e) => {
+              e.stopPropagation()
+              e.preventDefault()
+              window.desktop?.openDocument()
+            }, true)
+          }
+        }
+      }
+      overrideOpenDoc()
       // Keep re-injecting whenever the DOM changes (dialog opens/closes, React re-renders).
       injectBtn()
       new MutationObserver(injectBtn).observe(document.body, { childList: true, subtree: true })
+      new MutationObserver(overrideOpenDoc).observe(document.body, { childList: true, subtree: true })
     })()`, true).catch(() => {})
   })
   await window.loadURL(origin)
@@ -995,6 +1012,20 @@ async function boot(): Promise<void> {
   // — an accepted install relaunches the app, and that relaunch (now up to
   // date) runs the runtime check. Only when no app update exists does the
   // runtime check run now. Declining therefore updates nothing at all.
+  // Main-process "open document" for the settings page.  The renderer's
+  // override of "打开配置文件" calls this via the desktop bridge; it resolves
+  // the DSH settings document path and opens it (or shows Open With for
+  // unassociated types).  Bypasses the Host API entirely, so the hidden
+  // window-station issue cannot interfere.
+  ipcMain.handle('desktop:open-document', async () => {
+    const candidate = join(DSH_HOME, 'settings.yaml')
+    if (existsSync(candidate)) {
+      const error = await shell.openPath(candidate)
+      if (error !== '') {
+        execFile('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', candidate], { windowsHide: true })
+      }
+    }
+  })
   const decision = await checkAppUpdate(false)
   if (decision === 'installing') {
     // Splash stays open painting download progress (onUpdateMessage).
