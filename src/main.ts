@@ -136,6 +136,23 @@ function isThemeSource(value: unknown): value is 'light' | 'dark' | 'system' {
   return value === 'light' || value === 'dark' || value === 'system'
 }
 
+/** Ensure the web profile includes the file-based settings provider. */
+function ensureWebProfileSettingsFile(): void {
+  const profilePkgPath = join(WEB_PROFILE_DIR, 'package.json')
+  if (!existsSync(profilePkgPath)) return
+  try {
+    const profilePkg = JSON.parse(readFileSync(profilePkgPath, 'utf8')) as { dsh?: { profile?: { bundles?: string[] } } }
+    const bundles = profilePkg.dsh?.profile?.bundles
+    if (Array.isArray(bundles) && !bundles.includes('@deepseek-ai/dsh-settings-file')) {
+      bundles.push('@deepseek-ai/dsh-settings-file')
+      writeFileSync(profilePkgPath, JSON.stringify(profilePkg, null, 2) + '\n')
+      console.log('desktop: added @deepseek-ai/dsh-settings-file to web profile bundles')
+    }
+  } catch (error) {
+    console.error('desktop: failed to patch web profile bundles:', error)
+  }
+}
+
 /**
  * Wire the renderer's optional desktop bridge: mirror the app theme onto the
  * native chrome. `nativeTheme.themeSource` drives Windows title-bar dark
@@ -865,49 +882,53 @@ async function createMainWindow(): Promise<BrowserWindow> {
     if (isExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  await window.loadURL(origin)
-  // Inject theme observer + plugin manager button into the sidebar.
-  window.webContents.executeJavaScript(`(() => {
-    const api = window.desktop
-    if (typeof api === 'undefined') return
+  // Re-inject desktop features on every page load (Ctrl+R / F5). The injection
+  // is idempotent (checks for existing elements), so running it on every
+  // main-frame load — including the initial one — is safe.
+  window.webContents.on('did-finish-load', () => {
+    window.webContents.executeJavaScript(`(() => {
+      const api = window.desktop
+      if (typeof api === 'undefined') return
 
-    /* ── theme sync ── */
-    const syncTheme = () => {
-      const isDark = document.body?.getAttribute('data-ds-dark-theme') === ''
-      api.setNativeTheme(isDark ? 'dark' : 'light')
-    }
-    syncTheme()
-    new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+      /* ── theme sync ── */
+      const syncTheme = () => {
+        const isDark = document.body?.getAttribute('data-ds-dark-theme') === ''
+        api.setNativeTheme(isDark ? 'dark' : 'light')
+      }
+      syncTheme()
+      new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
 
-    /* ── inject plugin manager button into the settings dialog ── */
-    const PLUGIN_BTN_ID = 'dsh-plugin-mgr-btn'
-    const injectBtn = () => {
-      if (document.getElementById(PLUGIN_BTN_ID) !== null) return
-      // The settings panel is the full-viewport modal dialog.
-      const dialog = document.querySelector('[role="dialog"][aria-modal="true"]')
-      if (dialog === null) return
-      // dialog → [nav, content]; content → [header, options]; header → [actions, close]
-      const content = dialog.children[1]
-      if (content === undefined) return
-      const header = content.children[0]
-      if (header === undefined) return
-      const actions = header.children[0]
-      if (actions === undefined) return
-      const btn = document.createElement('button')
-      btn.id = PLUGIN_BTN_ID
-      btn.setAttribute('type', 'button')
-      btn.setAttribute('aria-label', '插件管理')
-      btn.style.cssText = 'display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:none;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;line-height:30px;cursor:pointer;white-space:nowrap'
+      /* ── inject plugin manager button into the settings dialog ── */
+      const PLUGIN_BTN_ID = 'dsh-plugin-mgr-btn'
+      const injectBtn = () => {
+        if (document.getElementById(PLUGIN_BTN_ID) !== null) return
+        // The settings panel is the full-viewport modal dialog.
+        const dialog = document.querySelector('[role="dialog"][aria-modal="true"]')
+        if (dialog === null) return
+        // dialog → [nav, content]; content → [header, options]; header → [actions, close]
+        const content = dialog.children[1]
+        if (content === undefined) return
+        const header = content.children[0]
+        if (header === undefined) return
+        const actions = header.children[0]
+        if (actions === undefined) return
+        const btn = document.createElement('button')
+        btn.id = PLUGIN_BTN_ID
+        btn.setAttribute('type', 'button')
+        btn.setAttribute('aria-label', '插件管理')
+        btn.style.cssText = 'display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:none;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;line-height:30px;cursor:pointer;white-space:nowrap'
       btn.innerHTML = '⚙ 插件管理'
-      btn.addEventListener('click', () => { api.openPluginManager() })
-      btn.addEventListener('mouseenter', () => { btn.style.background = 'var(--dsw-alias-interactive-bg-hover)' })
-      btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.06)' })
-      actions.appendChild(btn)
-    }
-    // Keep re-injecting whenever the DOM changes (dialog opens/closes, React re-renders).
-    injectBtn()
-    new MutationObserver(injectBtn).observe(document.body, { childList: true, subtree: true })
-  })()`, true).catch(() => {})
+        btn.addEventListener('click', () => { api.openPluginManager() })
+        btn.addEventListener('mouseenter', () => { btn.style.background = 'var(--dsw-alias-interactive-bg-hover)' })
+        btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.06)' })
+        actions.appendChild(btn)
+      }
+      // Keep re-injecting whenever the DOM changes (dialog opens/closes, React re-renders).
+      injectBtn()
+      new MutationObserver(injectBtn).observe(document.body, { childList: true, subtree: true })
+    })()`, true).catch(() => {})
+  })
+  await window.loadURL(origin)
   if (!lifecycle?.isQuitting) window.show()
   return window
 }
@@ -984,6 +1005,9 @@ async function boot(): Promise<void> {
   try {
     const paths = await resolveHostPaths(splash, skipRuntimeUpdate)
     assertHostArtifacts(paths)
+    // Ensure the web profile includes the file-based settings provider so the
+    // "open config file" button in the settings UI works.
+    ensureWebProfileSettingsFile()
     host = createHostSupervisor({
       spawnHost: () => spawnDshWeb({
         ...paths,

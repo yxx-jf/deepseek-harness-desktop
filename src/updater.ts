@@ -57,6 +57,9 @@ export function setupAutoUpdater(updaterHooks: UpdaterHooks, feedUrl?: string): 
   }
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
+  // The project ships prerelease builds (0.1.0-rc.x); without this the
+  // prerelease channel is ignored and no update is ever offered.
+  autoUpdater.allowPrerelease = true
   console.info(`desktop updater: wired (${feedUrl === undefined ? 'github provider' : 'generic mirror feed'}, user-confirmed updates)`)
 
   autoUpdater.on('download-progress', (progress) => {
