@@ -77,22 +77,26 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
 
   // Patch the native path opener so that .yaml/.yml/.json files (which
   // commonly have no file association on Windows) are opened with Notepad,
-  // launched fire-and-forget (Start-Process) so the openDocument request does
-  // not hang on a long-lived GUI process.
+  // launched via spawn+detached so the openDocument request neither hangs on
+  // a long-lived GUI process nor fails silently in the ELECTRON_RUN_AS_NODE
+  // child-process context (execFile and Start-Process both misbehave there).
   const openerPath = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'types', 'native-path-opener.js')
   if (existsSync(openerPath)) {
     const text = readFileSync(openerPath, 'utf8')
-    // If the patch is absent (both the pristine Invoke-Item form and any
-    // intermediate forms lack the final Start-Process variant), rewrite the
-    // openWindowsPath function block wholesale.
-    const marker = 'Start-Process -FilePath notepad.exe'
+    // If the final patch is absent, converge any previous form (pristine
+    // Invoke-Item, blocking notepad, Start-Process) to the spawn+detached one.
+    const marker = "spawn('notepad.exe'"
     if (!text.includes(marker)) {
       // (Pristine) function body without the extension special-case.
       const pristineFn = 'async function openWindowsPath(path, signal, run) {\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
       // (Intermediate) blocking notepad spawn.
       const blockingFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'notepad.exe\', [path], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      const finalFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Fire-and-forget: the editor is a long-lived GUI process; waiting on\n        // it would hang the openDocument request until the user closes it.\n        await run(\'powershell.exe\', [\n            \'-NoProfile\',\n            \'-Command\',\n            \`Start-Process -FilePath notepad.exe -ArgumentList \${powershellLiteral(path)}\`,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      const oldBody = text.includes(blockingFn) ? blockingFn : (text.includes(pristineFn) ? pristineFn : undefined)
+      // (Previous patch) Start-Process fire-and-forget.
+      const startProcessFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Fire-and-forget: the editor is a long-lived GUI process; waiting on\n        // it would hang the openDocument request until the user closes it.\n        await run(\'powershell.exe\', [\n            \'-NoProfile\',\n            \'-Command\',\n            \`Start-Process -FilePath notepad.exe -ArgumentList \${powershellLiteral(path)}\`,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const finalFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Spawn notepad detached so the parent (Host) does not wait for the\n        // GUI editor to close.  execFile & Start-Process both fail silently\n        // in the ELECTRON_RUN_AS_NODE child-process context; spawn+detached\n        // works reliably.\n        const { spawn } = await import(\'node:child_process\');\n        const child = spawn(\'notepad.exe\', [path], { detached: true, stdio: \'ignore\' });\n        child.unref();\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const oldBody = text.includes(startProcessFn) ? startProcessFn
+        : (text.includes(blockingFn) ? blockingFn
+          : (text.includes(pristineFn) ? pristineFn : undefined))
       if (oldBody !== undefined) {
         writeFileSync(openerPath, text.replace(oldBody, finalFn))
         console.log('afterPack: patched native-path-opener for text file types')
