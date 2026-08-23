@@ -42,6 +42,21 @@ const els = {
   restartBtn: document.getElementById('restartBtn'),
   log: document.getElementById('log'),
   diag: document.getElementById('diag'),
+  pager: document.getElementById('pager'),
+  pagePrev: document.getElementById('pagePrev'),
+  pageNext: document.getElementById('pageNext'),
+  pageInfo: document.getElementById('pageInfo'),
+  modalOverlay: document.getElementById('modalOverlay'),
+  mdName: document.getElementById('mdName'),
+  mdFullName: document.getElementById('mdFullName'),
+  mdStars: document.getElementById('mdStars'),
+  mdTopics: document.getElementById('mdTopics'),
+  mdDesc: document.getElementById('mdDesc'),
+  mdStatus: document.getElementById('mdStatus'),
+  mdReadme: document.getElementById('mdReadme'),
+  mdClose: document.getElementById('mdClose'),
+  mdCloseBtn: document.getElementById('mdCloseBtn'),
+  mdSubscribeBtn: document.getElementById('mdSubscribeBtn'),
 }
 
 function diag(msg, cls) {
@@ -64,6 +79,10 @@ let activeTab = 'community'
 
 /** Latest subscriptions record from the main process. */
 let subscriptions = {}
+
+/** Current page and query for community search. */
+let currentPage = 1
+let currentQuery = ''
 
 function log(msg, cls = 'info') {
   const line = document.createElement('div')
@@ -106,32 +125,54 @@ function refreshBrowse() {
   setLoading()
   clearTimeout(searchTimer)
   searchTimer = setTimeout(async () => {
-    const query = els.search.value.trim()
-    diag('正在搜索社区插件' + (query ? '：' + query : '') + '…')
-    const started = Date.now()
-    try {
-      const result = await withTimeout(api.searchPlugins('community', query), 15000, '搜索请求')
-      const elapsed = ((Date.now() - started) / 1000).toFixed(1)
-      if (!result.ok) { errorBox(result.error || '搜索失败'); diag('搜索失败：' + (result.error || ''), 'err'); return }
-      const repos = result.repos || []
-      diag('搜索完成（' + elapsed + 's），找到 ' + repos.length + ' 个仓库。已验证的插件会显示「已验证」标记', 'ok')
-      renderRepos(repos)
-    } catch (e) {
-      diag('加载失败：' + String(e), 'err')
-      errorBox('加载失败：' + String(e) + '。请检查网络后重试。')
-    }
+    currentQuery = els.search.value.trim()
+    currentPage = 1
+    await searchPage(1)
   }, 300)
 }
 
-function renderRepos(repos) {
+async function searchPage(page) {
+  currentPage = page
+  setLoading()
+  const query = currentQuery
+  diag('正在搜索社区插件' + (query ? '：' + query : '') + '…')
+  const started = Date.now()
+  try {
+    const result = await withTimeout(api.searchPlugins('community', query, page), 15000, '搜索请求')
+    const elapsed = ((Date.now() - started) / 1000).toFixed(1)
+    if (!result.ok) { errorBox(result.error || '搜索失败'); diag('搜索失败：' + (result.error || ''), 'err'); return }
+    const repos = result.repos || []
+    const totalCount = result.totalCount
+    diag('搜索完成（' + elapsed + 's），' + repos.length + ' 个仓库' + (totalCount ? '（共约 ' + totalCount + ' 个）' : '') + '。已验证的插件会显示「已验证」标记', 'ok')
+    renderRepos(repos, totalCount)
+  } catch (e) {
+    diag('加载失败：' + String(e), 'err')
+    errorBox('加载失败：' + String(e) + '。请检查网络后重试。')
+  }
+}
+
+function updatePager(totalCount, repoCount) {
+  els.pageInfo.textContent = '第 ' + currentPage + ' 页'
+  els.pagePrev.disabled = currentPage <= 1
+  // 如果返回少于 30 个，说明已到最后一页
+  const hasMore = totalCount !== undefined
+    ? currentPage * 30 < totalCount
+    : repoCount >= 30
+  els.pageNext.disabled = !hasMore
+}
+
+function renderRepos(repos, totalCount) {
   if (!Array.isArray(repos) || repos.length === 0) {
     showEmpty('没有搜索到插件。试试其他关键词？')
+    updatePager(0, 0)
     return
   }
   els.list.innerHTML = ''
   for (const repo of repos) {
     const row = document.createElement('div')
     row.className = 'pkg'
+    row.style.cursor = 'pointer'
+    row.addEventListener('click', () => openDetail(repo))
 
     const sub = subscriptions[repo.cloneUrl] || subscriptions[repo.htmlUrl]
     const info = document.createElement('div')
@@ -163,7 +204,7 @@ function renderRepos(repos) {
       btn.title = '已订阅，可在「已安装」页启用'
     } else {
       btn.textContent = '订阅'
-      btn.addEventListener('click', () => subscribeRepo(repo, btn))
+      btn.addEventListener('click', (e) => { e.stopPropagation(); subscribeRepo(repo, btn) })
     }
     actions.appendChild(btn)
 
@@ -174,19 +215,24 @@ function renderRepos(repos) {
     // 异步验证 dsh.bundle，不阻塞显示
     verifyBundle(repo, row)
   }
+  updatePager(totalCount, repos.length)
 }
 
-/** 异步检查仓库是否有 dsh.bundle，有则添加「已验证」标记。 */
+/** 异步检查仓库是否有 dsh.bundle，有则添加「已验证」标记。
+ * 如果 row 为 null，只返回验证结果（用于详情页）。
+ * 返回 true/false 表示是否已验证。 */
 async function verifyBundle(repo, row) {
   try {
     const result = await api.checkBundle(repo.fullName, repo.defaultBranch)
-    if (result.ok && result.reachable && result.verified) {
+    const verified = result.ok && result.reachable && result.verified
+    if (verified && row) {
       const badge = document.createElement('span')
       badge.className = 'status enabled'
       badge.textContent = '✓ 已验证'
       row.querySelector('.name').appendChild(badge)
     }
-  } catch { /* 静默失败，不阻塞 UI */ }
+    return verified
+  } catch { return false }
 }
 
 async function subscribeRepo(repo, btn) {
@@ -198,6 +244,8 @@ async function subscribeRepo(repo, btn) {
     log('订阅成功 ✓（文件已下载，去「已安装」页启用）', 'ok')
     await loadSubscriptions()
     showRestartHint(result.candidates && result.candidates.length > 0)
+    // 如详情页打开，更新订阅按钮状态
+    updateDetailSubscribeBtn(repo)
     refreshBrowse()
   } catch (e) {
     log('订阅异常：' + String(e), 'err')
@@ -360,6 +408,79 @@ function showRestartHint(show) {
   if (show) els.restartBanner.classList.add('show')
 }
 
+/* ─────────────────────── Detail modal ────────────────────── */
+
+/** Currently open repo in the detail modal, or null. */
+let detailRepo = null
+
+function openDetail(repo) {
+  detailRepo = repo
+  els.mdName.textContent = repo.name
+  els.mdFullName.textContent = repo.fullName
+  els.mdStars.textContent = String(repo.stars)
+  els.mdDesc.textContent = repo.description || '（无描述）'
+  // Topics
+  els.mdTopics.innerHTML = ''
+  if (Array.isArray(repo.topics)) {
+    for (const t of repo.topics) {
+      const tag = document.createElement('span')
+      tag.textContent = t
+      els.mdTopics.appendChild(tag)
+    }
+  }
+  // Status
+  els.mdStatus.textContent = ''
+  els.mdStatus.className = 'md-status'
+  // README
+  els.mdReadme.textContent = '加载中…'
+  // Subscribe button
+  updateDetailSubscribeBtn(repo)
+
+  els.modalOverlay.classList.add('open')
+
+  // Async bundle check
+  verifyBundle(repo, null).then((verified) => {
+    if (detailRepo !== repo) return
+    if (verified) {
+      els.mdStatus.innerHTML = '<span class="status enabled">✓ 已验证 DSH 插件</span>'
+    } else {
+      els.mdStatus.innerHTML = '<span class="status disabled">未验证（可能不是 DSH 插件）</span>'
+    }
+  })
+
+  // Async README fetch
+  api.repoReadme(repo.fullName, repo.defaultBranch).then((result) => {
+    if (detailRepo !== repo) return
+    if (result.ok) {
+      els.mdReadme.textContent = result.readme
+    } else {
+      els.mdReadme.textContent = '（无 README 或加载失败）'
+    }
+  }).catch(() => {
+    if (detailRepo !== repo) return
+    els.mdReadme.textContent = '（加载 README 失败）'
+  })
+}
+
+function closeDetail() {
+  detailRepo = null
+  els.modalOverlay.classList.remove('open')
+}
+
+function updateDetailSubscribeBtn(repo) {
+  if (!els.mdSubscribeBtn) return
+  const sub = repo ? (subscriptions[repo.cloneUrl] || subscriptions[repo.htmlUrl]) : undefined
+  if (sub !== undefined) {
+    els.mdSubscribeBtn.textContent = '✓ 已订阅'
+    els.mdSubscribeBtn.disabled = true
+    els.mdSubscribeBtn.className = 'secondary'
+  } else {
+    els.mdSubscribeBtn.textContent = '订阅'
+    els.mdSubscribeBtn.disabled = false
+    els.mdSubscribeBtn.className = ''
+  }
+}
+
 /* ─────────────────────── Tab switching ────────────────────── */
 
 function switchTab(tab) {
@@ -367,9 +488,11 @@ function switchTab(tab) {
   for (const b of els.tabButtons) b.classList.toggle('active', b.dataset.tab === tab)
   if (tab === 'installed') {
     els.toolbar.style.display = 'none'
+    els.pager.classList.remove('show')
     renderInstalled()
   } else {
     els.toolbar.style.display = 'flex'
+    els.pager.classList.add('show')
     els.hint.textContent = 'DSH 社区插件'
     els.search.placeholder = '搜索插件…（按 ⭐ 热度降序）'
     refreshBrowse()
@@ -383,6 +506,19 @@ for (const b of els.tabButtons) {
 }
 els.search.addEventListener('input', () => { if (activeTab !== 'installed') refreshBrowse() })
 els.restartBtn.addEventListener('click', () => { api.quitApp() })
+
+// Pagination
+els.pagePrev.addEventListener('click', () => { if (currentPage > 1) searchPage(currentPage - 1) })
+els.pageNext.addEventListener('click', () => { searchPage(currentPage + 1) })
+
+// Detail modal
+els.mdClose.addEventListener('click', closeDetail)
+els.mdCloseBtn.addEventListener('click', closeDetail)
+els.modalOverlay.addEventListener('click', (e) => { if (e.target === els.modalOverlay) closeDetail() })
+els.mdSubscribeBtn.addEventListener('click', () => {
+  if (!detailRepo) return
+  subscribeRepo(detailRepo, els.mdSubscribeBtn)
+})
 
 // Initial render.
 try {

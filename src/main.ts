@@ -185,12 +185,13 @@ function wireDesktopBridge(): void {
     app.relaunch()
     void requestAppQuit()
   })
-  ipcMain.handle('desktop:plugin-search', async (_event, category: string, query: string): Promise<{ ok: true; repos: GitHubRepo[] } | { ok: false; error: string }> => {
+  ipcMain.handle('desktop:plugin-search', async (_event, category: string, query: string, page: number): Promise<{ ok: true; repos: GitHubRepo[]; page: number; totalCount?: number } | { ok: false; error: string }> => {
     if (category !== 'community' && category !== 'theme') return { ok: false, error: 'category 必须是 community 或 theme' }
+    const pageNum = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1
     try {
-      const result = await searchGitHubRepos(category, query)
+      const result = await searchGitHubRepos(category, query, pageNum)
       if (result.error !== undefined && result.repos.length === 0) return { ok: false, error: result.error }
-      return { ok: true, repos: result.repos }
+      return { ok: true, repos: result.repos, page: pageNum, totalCount: result.totalCount }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -199,6 +200,14 @@ function wireDesktopBridge(): void {
     try {
       const result = await dshBundleCheck(fullName, defaultBranch)
       return { ok: true, reachable: result.reachable, verified: result.verified }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('desktop:plugin-repo-readme', async (_event, fullName: string, defaultBranch: string): Promise<{ ok: true; readme: string } | { ok: false; error: string }> => {
+    try {
+      const readme = await fetchRepoReadme(fullName, defaultBranch)
+      return { ok: true, readme }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -515,7 +524,7 @@ function writeSubscriptions(subs: Record<string, PluginSubscription>): void {
 }
 
 /** Short in-memory cache for GitHub searches (unauthenticated rate limits). */
-const searchCache = new Map<string, { at: number; repos: GitHubRepo[] }>()
+const searchCache = new Map<string, { at: number; repos: GitHubRepo[]; totalCount?: number }>()
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000
 /** Error descriptions per search key, for surfacing to the UI. */
 const searchErrors = new Map<string, string>()
@@ -566,34 +575,37 @@ async function fetchWithTimeout(url: string, timeoutMs = GITHUB_ATTEMPT_TIMEOUT_
 }
 
 /** Query GitHub's repository search for dsh plugins, sorted by stars. */
-async function searchGitHubRepos(category: 'community' | 'theme', query: string): Promise<{ repos: GitHubRepo[]; error?: string }> {
+async function searchGitHubRepos(category: 'community' | 'theme', query: string, page = 1): Promise<{ repos: GitHubRepo[]; error?: string; totalCount?: number }> {
   const q = query.trim()
   // Theme category unions the theme/skin topics (deduped below); community is the umbrella topic.
   const topics = category === 'theme' ? ['dsh-theme', 'dsh-skin'] : ['dsh-plugin']
-  const cacheKey = `${category}:${q}`
+  const cacheKey = `${category}:${q}:${page}`
   const cached = searchCache.get(cacheKey)
-  if (cached !== undefined && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return { repos: cached.repos }
+  if (cached !== undefined && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return { repos: cached.repos, totalCount: cached.totalCount }
 
   searchErrors.clear()
   const merged = new Map<number, GitHubRepo>()
-  const results = await Promise.all(topics.map(topic => fetchTopic(topic, q)))
+  const results = await Promise.all(topics.map(topic => fetchTopic(topic, q, page)))
+  let totalCount: number | undefined
   for (const items of results) {
-    for (const repo of items) merged.set(repo.id, repo)
+    for (const repo of items.repos) merged.set(repo.id, repo)
+    if (totalCount === undefined && items.totalCount !== undefined) totalCount = items.totalCount
   }
   const repos = Array.from(merged.values()).sort((a, b) => b.stars - a.stars)
-  searchCache.set(cacheKey, { at: Date.now(), repos })
+  searchCache.set(cacheKey, { at: Date.now(), repos, totalCount })
   // If nothing loaded and every attempt errored, surface it instead of an empty list.
   if (repos.length === 0 && searchErrors.size > 0) {
     const reasons = [...new Set(searchErrors.values())].join('；')
     return { repos: [], error: `无法访问 GitHub（${reasons}）。已尝试直连与国内镜像，请检查网络后重试。` }
   }
-  return { repos }
+  return { repos, totalCount }
 }
 
 /** Race one GitHub topic search across direct + mirrors; [] if all fail. */
-async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
+async function fetchTopic(topic: string, q: string, page = 1): Promise<{ repos: GitHubRepo[]; totalCount?: number }> {
   const searchQuery = `topic:${topic}${q === '' ? '' : ` ${q}`}`
-  const direct = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=stars&order=desc&per_page=30`
+  const perPage = 30
+  const direct = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=stars&order=desc&per_page=${perPage}&page=${page}`
   const headers = {
     Accept: 'application/vnd.github+json',
     'User-Agent': 'deepseek-harness-desktop',
@@ -602,7 +614,7 @@ async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
   const attempts = mirrorUrlCandidates(direct).map(async (url) => {
     const response = await fetchWithTimeout(url, GITHUB_ATTEMPT_TIMEOUT_MS, { headers })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json() as { items?: unknown[] }
+    const body = await response.json() as { items?: unknown[]; total_count?: unknown }
     const out: GitHubRepo[] = []
     for (const item of body.items ?? []) {
       const repo = item as {
@@ -623,7 +635,7 @@ async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
         defaultBranch: typeof repo.default_branch === 'string' ? repo.default_branch : 'main',
       })
     }
-    return out
+    return { repos: out, totalCount: typeof body.total_count === 'number' ? body.total_count : undefined }
   })
   try {
     return await Promise.any(attempts)
@@ -632,8 +644,8 @@ async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
     const reasons = error instanceof AggregateError
       ? [...new Set(error.errors.map(e => e instanceof Error ? e.message : String(e)))].join('；')
       : String(error)
-    searchErrors.set(`${topic}:${q}`, reasons)
-    return []
+    searchErrors.set(`${topic}:${q}:${page}`, reasons)
+    return { repos: [] }
   }
 }
 
@@ -661,6 +673,25 @@ async function dshBundleCheck(fullName: string, defaultBranch: string): Promise<
     }
   }
   return { reachable: false, verified: false }
+}
+
+/** Fetch a GitHub repo's README.md content via mirrors. */
+async function fetchRepoReadme(fullName: string, defaultBranch: string): Promise<string> {
+  const candidates = [...new Set([defaultBranch, 'main', 'master'].filter(Boolean))]
+  for (const branch of candidates) {
+    for (const file of ['README.md', 'readme.md', 'README.markdown', 'Readme.md']) {
+      const original = `https://raw.githubusercontent.com/${fullName}/${branch}/${file}`
+      const attempts = mirrorUrlCandidates(original).map(async (url) => {
+        const response = await fetchWithTimeout(url, GITHUB_ATTEMPT_TIMEOUT_MS)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return await response.text()
+      })
+      try {
+        return await Promise.any(attempts)
+      } catch { /* try next file name */ }
+    }
+  }
+  throw new Error('README not found')
 }
 
 /** Resolve the dsh CLI entry the desktop app uses (development checkout or packaged runtime). */

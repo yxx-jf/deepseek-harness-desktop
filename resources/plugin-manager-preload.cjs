@@ -17,10 +17,12 @@ contextBridge.exposeInMainWorld('desktop', {
   uninstallPlugin: (name) => ipcRenderer.invoke('desktop:plugin-uninstall', name),
   /** Quit (and relaunch) the application after plugin config changes. */
   quitApp: () => ipcRenderer.invoke('desktop:quit'),
-  /** Search GitHub for dsh plugins by category. */
-  searchPlugins: (category, query) => ipcRenderer.invoke('desktop:plugin-search', category, query),
+  /** Search GitHub for dsh plugins by category (page is 1-based). */
+  searchPlugins: (category, query, page) => ipcRenderer.invoke('desktop:plugin-search', category, query, page || 1),
   /** Check whether a GitHub repo exposes a valid dsh.bundle (via main-process mirrors). */
   checkBundle: (fullName, defaultBranch) => ipcRenderer.invoke('desktop:plugin-bundle-check', fullName, defaultBranch),
+  /** Fetch a GitHub repo's README.md (via mirrors). */
+  repoReadme: (fullName, defaultBranch) => ipcRenderer.invoke('desktop:plugin-repo-readme', fullName, defaultBranch),
   /** List all subscriptions. */
   listSubscriptions: () => ipcRenderer.invoke('desktop:plugin-subscriptions'),
   /** Subscribe (clone) a plugin repo by URL. */

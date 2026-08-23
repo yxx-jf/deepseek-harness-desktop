@@ -155,6 +155,81 @@
     .log .ok { color: var(--success); }
     .log .err { color: #f26a6a; }
     .log .info { color: var(--accent); }
+
+    /* ── Pagination ── */
+    .pager {
+      display: none; align-items: center; gap: 6px;
+      margin-left: auto; white-space: nowrap;
+    }
+    .pager.show { display: flex; }
+    .pager button {
+      height: 28px; padding: 0 10px; font-size: 12px;
+    }
+    .pager .page-info {
+      font-size: 12px; color: var(--text-secondary); min-width: 60px; text-align: center;
+    }
+
+    /* ── Detail modal ── */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,0.5); -webkit-app-region: no-drag;
+    }
+    .modal-overlay.open { display: flex; align-items: center; justify-content: center; }
+    .modal {
+      width: 86%; max-width: 680px; max-height: 85vh;
+      display: flex; flex-direction: column;
+      background: var(--bg-layer-1); border: 1px solid var(--border-medium);
+      border-radius: 16px; box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+      overflow: hidden;
+    }
+    .modal-header {
+      flex: none; display: flex; align-items: flex-start; gap: 12px;
+      padding: 20px 24px 12px; border-bottom: 1px solid var(--border-light);
+    }
+    .modal-header .mh-info { flex: 1; min-width: 0; }
+    .modal-header .mh-name { font-size: 18px; font-weight: 700; }
+    .modal-header .mh-fullname { font-size: 12px; color: var(--text-tertiary); font-family: Consolas, monospace; margin-top: 2px; }
+    .modal-header .mh-meta { display: flex; gap: 12px; margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+    .modal-header .mh-meta span { display: flex; align-items: center; gap: 3px; }
+    .modal-header .mh-close {
+      flex: none; width: 28px; height: 28px; border: none; border-radius: 8px;
+      background: transparent; color: var(--text-secondary); font-size: 18px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal-header .mh-close:hover { background: var(--card-bg); color: var(--text-primary); }
+    .modal-body {
+      flex: 1; overflow-y: auto; padding: 16px 24px 20px;
+    }
+    .modal-body .md-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 14px; }
+    .modal-body .md-topics { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .modal-body .md-topics span {
+      padding: 2px 10px; border-radius: 12px; font-size: 11px;
+      background: var(--accent-soft); color: var(--accent);
+    }
+    .modal-body .md-status { margin-bottom: 14px; }
+    .modal-body .md-readme-label {
+      font-size: 13px; font-weight: 600; color: var(--text-primary);
+      margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+    }
+    .modal-body .md-readme {
+      font-size: 12px; line-height: 1.7; color: var(--text-secondary);
+      white-space: pre-wrap; word-break: break-word;
+      background: var(--card-bg); border: 1px solid var(--border-light);
+      border-radius: 10px; padding: 14px; max-height: 320px; overflow-y: auto;
+    }
+    .modal-body .md-readme h1 { font-size: 15px; margin: 0 0 8px; color: var(--text-primary); }
+    .modal-body .md-readme h2 { font-size: 14px; margin: 10px 0 6px; color: var(--text-primary); }
+    .modal-body .md-readme h3 { font-size: 13px; margin: 8px 0 4px; color: var(--text-primary); }
+    .modal-body .md-readme p { margin: 4px 0; }
+    .modal-body .md-readme code { background: var(--log-bg); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+    .modal-body .md-readme pre { background: var(--log-bg); padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 11px; margin: 6px 0; }
+    .modal-body .md-readme ul, .modal-body .md-readme ol { margin: 4px 0; padding-left: 20px; }
+    .modal-body .md-readme a { color: var(--accent); }
+    .modal-body .md-readme img { max-width: 100%; border-radius: 6px; }
+    .modal-footer {
+      flex: none; display: flex; gap: 8px; justify-content: flex-end;
+      padding: 12px 24px 18px; border-top: 1px solid var(--border-light);
+    }
   </style>
 </head>
 <body>
@@ -169,6 +244,11 @@
     <div class="toolbar" id="toolbar">
       <input id="search" type="text" placeholder="搜索插件…（按 ⭐ 热度降序）" spellcheck="false">
       <span class="hint" id="hint"></span>
+      <div class="pager" id="pager">
+        <button id="pagePrev" class="secondary" disabled>‹ 上一页</button>
+        <span class="page-info" id="pageInfo">第 1 页</span>
+        <button id="pageNext" class="secondary">下一页 ›</button>
+      </div>
     </div>
     <div class="diag" id="diag">启动中…</div>
     <div class="list" id="list"><div class="empty" id="loading">加载中…</div></div>
@@ -180,6 +260,34 @@
     </div>
     <div class="log" id="log"></div>
   </div>
+
+  <!-- ── Detail modal ── -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="mh-info">
+          <div class="mh-name" id="mdName"></div>
+          <div class="mh-fullname" id="mdFullName"></div>
+          <div class="mh-meta">
+            <span>⭐ <span id="mdStars"></span></span>
+            <span id="mdTopics" class="md-topics" style="display:inline-flex;gap:4px;margin:0"></span>
+          </div>
+        </div>
+        <button class="mh-close" id="mdClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="md-desc" id="mdDesc"></div>
+        <div class="md-status" id="mdStatus"></div>
+        <div class="md-readme-label">📖 README</div>
+        <div class="md-readme" id="mdReadme">加载中…</div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary" id="mdCloseBtn">关闭</button>
+        <button id="mdSubscribeBtn">订阅</button>
+      </div>
+    </div>
+  </div>
+
   <script src="plugin-manager.js"></script>
 </body>
 </html>
