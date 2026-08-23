@@ -1023,7 +1023,10 @@ async function boot(): Promise<void> {
         intervalMs: INSTALLER_POLL_INTERVAL_MS,
         onInstallerDetected: () => { void requestAppQuit() },
       })
-      installerWatch.start()
+      // Defer start so the NSIS "run after install" finish action does not
+      // immediately kill the freshly launched app (the installer process may
+      // still be alive briefly after the finish page is dismissed).
+      setTimeout(() => { installerWatch?.start() }, 20_000)
     }
     await lifecycle.showWindow()
   } finally {

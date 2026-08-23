@@ -75,6 +75,23 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
     }
   }
 
+  // Patch the native path opener so that .yaml/.yml/.json files (which
+  // commonly have no file association on Windows) are opened with Notepad
+  // instead of Invoke-Item, which silently does nothing for unassociated types.
+  const openerPath = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'types', 'native-path-opener.js')
+  if (existsSync(openerPath)) {
+    let text = readFileSync(openerPath, 'utf8')
+    const oldFn = 'async function openWindowsPath(path, signal, run) {\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+    const newFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'notepad.exe\', [path], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+    if (text.includes(oldFn)) {
+      text = text.replace(oldFn, newFn)
+      writeFileSync(openerPath, text)
+      console.log('afterPack: patched native-path-opener for text file types')
+    } else {
+      console.log('afterPack: native-path-opener openWindowsPath signature mismatch (skipped)')
+    }
+  }
+
   console.log(`afterPack: copying runtime-host to ${hostDir}`)
   cpSync(RUNTIME_HOST_DIR, hostDir, { recursive: true, dereference: true })
   for (const segments of REQUIRED_HOST_FILES) {
