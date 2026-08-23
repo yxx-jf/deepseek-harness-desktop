@@ -4,7 +4,6 @@
  *
  * Community tab shows search results and asynchronously verifies dsh.bundle
  * for each repo, adding a badge on verified ones without blocking the list. */
- */
 
 /* ─────────────────────── Theme sync ────────────────────── */
 
