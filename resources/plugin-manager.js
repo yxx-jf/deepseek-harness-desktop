@@ -1,8 +1,33 @@
-/**
- * Plugin manager dialog script. Three tabs: 社区 (GitHub browse), 主题 (theme
- * browse), 已安装 (subscriptions + activation). Talks to the main process
- * through the sandboxed preload bridge (window.desktop).
+/** Plugin manager dialog script. Two tabs: 社区 (GitHub browse), 已安装
+ * (subscriptions + activation). Talks to the main process through the
+ * sandboxed preload bridge (window.desktop).
+ *
+ * Community tab pre-scans GitHub repos for valid dsh.bundle before showing,
+ * so only real DSH plugins appear.
  */
+
+/* ─────────────────────── Theme sync ────────────────────── */
+
+/** Apply theme from the query param or the native theme API. */
+async function applyTheme(source) {
+  const isDark = source === 'dark' || (source === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+  document.body.setAttribute('data-ds-dark-theme', String(isDark))
+}
+
+// Initialize theme from query param, then listen for changes.
+void (async () => {
+  const params = new URLSearchParams(window.location.search)
+  const themeParam = params.get('theme')
+  if (themeParam) {
+    applyTheme(themeParam)
+  } else if (api?.getTheme) {
+    api.getTheme().then(applyTheme)
+  }
+})()
+api?.onThemeChanged?.(applyTheme)
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  api?.getTheme().then(applyTheme)
+})
 const els = {
   tabs: document.getElementById('tabs'),
   tabButtons: Array.from(document.querySelectorAll('.tab')),
@@ -34,7 +59,7 @@ window.addEventListener('unhandledrejection', (e) => {
 
 const api = window.desktop
 
-/** Active tab: 'community' | 'theme' | 'installed'. */
+/** Active tab: 'community' | 'installed'. */
 let activeTab = 'community'
 
 /** Latest subscriptions record from the main process. */
@@ -66,7 +91,23 @@ function errorBox(text) {
   els.list.innerHTML = `<div class="empty" style="color:#f26a6a">${text}</div>`
 }
 
-/* ─────────────────────── GitHub browse (community/theme) ────────────────────── */
+/* ─────────────────────── GitHub browse (community) ────────────────────── */
+
+/** Quick check whether a GitHub repo has a valid dsh.bundle in its package.json. */
+async function hasDshBundle(repo) {
+  // Try the repo's default branch first, then fallback to main/master.
+  const branches = [repo.defaultBranch, 'main', 'master'].filter(Boolean)
+  for (const branch of [...new Set(branches)]) {
+    try {
+      const url = 'https://raw.githubusercontent.com/' + repo.fullName + '/' + branch + '/package.json'
+      const res = await fetch(url, { signal: AbortSignal.timeout(5000) })
+      if (!res.ok) continue
+      const pkg = await res.json()
+      if (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) return true
+    } catch {}
+  }
+  return false
+}
 
 let searchTimer = null
 /** Wrap an IPC promise with a hard timeout so a stalled fetch can't hang the UI. */
@@ -82,14 +123,21 @@ function refreshBrowse() {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(async () => {
     const query = els.search.value.trim()
-    diag(`正在搜索 ${activeTab === 'theme' ? '主题' : '社区'}插件${query ? '：' + query : ''}…（直连+镜像竞速，最多 ~6s）`)
+    diag('正在搜索社区插件' + (query ? '：' + query : '') + '…')
     const started = Date.now()
     try {
-      const result = await withTimeout(api.searchPlugins(activeTab, query), 15000, '搜索请求')
+      const result = await withTimeout(api.searchPlugins('community', query), 15000, '搜索请求')
       const elapsed = ((Date.now() - started) / 1000).toFixed(1)
       if (!result.ok) { errorBox(result.error || '搜索失败'); diag('搜索失败：' + (result.error || ''), 'err'); return }
-      renderRepos(result.repos)
-      diag(`搜索完成（${elapsed}s），找到 ${result.repos.length} 个仓库`, 'ok')
+      // Pre-scan each repo for a valid dsh.bundle before showing.
+      diag('正在验证插件有效性…')
+      const valid = []
+      for (const repo of (result.repos || [])) {
+        const ok = await hasDshBundle(repo)
+        if (ok) valid.push(repo)
+      }
+      diag('搜索完成（' + elapsed + 's），找到 ' + valid.length + ' 个有效插件', 'ok')
+      renderRepos(valid)
     } catch (e) {
       diag('加载失败：' + String(e), 'err')
       errorBox('加载失败：' + String(e) + '。请检查网络后重试。')
@@ -99,7 +147,7 @@ function refreshBrowse() {
 
 function renderRepos(repos) {
   if (!Array.isArray(repos) || repos.length === 0) {
-    showEmpty('没有找到插件。试试其他关键词？')
+    showEmpty('没有找到有效插件。试试其他关键词？')
     return
   }
   els.list.innerHTML = ''
@@ -181,7 +229,7 @@ async function renderInstalled() {
   // Show subscriptions first, then other installed bundles not tied to a subscription.
   els.list.innerHTML = ''
   if (entries.length === 0) {
-    showEmpty('还没有订阅任何插件。去「社区」或「主题」页浏览并订阅吧。')
+    showEmpty('还没有订阅任何插件。去「社区」页浏览并订阅吧。')
     return
   }
   for (const [repoUrl, sub] of entries) {
@@ -328,10 +376,8 @@ function switchTab(tab) {
     renderInstalled()
   } else {
     els.toolbar.style.display = 'flex'
-    els.hint.textContent = tab === 'theme' ? '主题/皮肤类插件' : 'DSH 社区插件'
-    els.search.placeholder = tab === 'theme'
-      ? '搜索主题插件…（按 ⭐ 热度降序）'
-      : '搜索插件…（按 ⭐ 热度降序）'
+    els.hint.textContent = 'DSH 社区插件'
+    els.search.placeholder = '搜索插件…（按 ⭐ 热度降序）'
     refreshBrowse()
   }
 }
@@ -349,7 +395,6 @@ try {
   diag('JS 已加载。desktop API：' + (typeof api !== 'undefined' && api !== null ? '存在' : '缺失'), typeof api !== 'undefined' && api !== null ? 'ok' : 'err')
   log('插件管理已就绪', 'ok')
   switchTab('community')
-  diag('已发起社区搜索…')
 } catch (e) {
   diag('初始化异常：' + String(e), 'err')
 }

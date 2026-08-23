@@ -145,6 +145,11 @@ function wireDesktopBridge(): void {
   ipcMain.handle('desktop:set-native-theme', (_event, source: unknown) => {
     if (isThemeSource(source)) nativeTheme.themeSource = source
   })
+  ipcMain.handle('desktop:get-native-theme', () => nativeTheme.themeSource)
+  // Broadcast theme changes to all open plugin-manager windows.
+  nativeTheme.on('updated', () => {
+    managerWindow?.webContents.send('theme-changed', nativeTheme.themeSource)
+  })
   ipcMain.handle('desktop:plugin-list', async (): Promise<{ ok: true; plugins: string[] } | { ok: false; error: string }> => {
     try {
       const pkgPath = join(WEB_PROFILE_DIR, 'package.json')
@@ -482,6 +487,7 @@ interface GitHubRepo {
   htmlUrl: string
   cloneUrl: string
   topics: string[]
+  defaultBranch: string
 }
 
 /** Local manifest of every subscribed plugin repo. */
@@ -593,7 +599,7 @@ async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
     for (const item of body.items ?? []) {
       const repo = item as {
         id: number; name?: unknown; full_name?: unknown; html_url?: unknown; clone_url?: unknown
-        owner?: { login?: unknown } | null; description?: unknown; stargazers_count?: unknown; topics?: unknown
+        owner?: { login?: unknown } | null; description?: unknown; stargazers_count?: unknown; topics?: unknown; default_branch?: unknown
       }
       if (typeof repo.name !== 'string') continue
       out.push({
@@ -606,6 +612,7 @@ async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
         htmlUrl: typeof repo.html_url === 'string' ? repo.html_url : '',
         cloneUrl: typeof repo.clone_url === 'string' ? repo.clone_url : `https://github.com/${repo.full_name ?? repo.name}.git`,
         topics: Array.isArray(repo.topics) ? repo.topics.filter((t): t is string => typeof t === 'string') : [],
+        defaultBranch: typeof repo.default_branch === 'string' ? repo.default_branch : 'main',
       })
     }
     return out
@@ -819,7 +826,9 @@ function openPluginManager(): void {
   manager.on('closed', () => {
     if (managerWindow === manager) managerWindow = undefined
   })
-  void manager.loadFile(pluginManagerHtmlPath()).then(() => {
+  void manager.loadFile(pluginManagerHtmlPath(), {
+    search: `?theme=${nativeTheme.themeSource}`,
+  }).then(() => {
     if (!manager.isDestroyed()) manager.show()
   })
 }

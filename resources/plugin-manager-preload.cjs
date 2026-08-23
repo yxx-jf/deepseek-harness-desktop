@@ -29,4 +29,12 @@ contextBridge.exposeInMainWorld('desktop', {
   disablePlugin: (repoUrl, bundleName) => ipcRenderer.invoke('desktop:plugin-disable', repoUrl, bundleName),
   /** Unsubscribe (disable + delete files). */
   unsubscribePlugin: (repoUrl) => ipcRenderer.invoke('desktop:plugin-unsubscribe', repoUrl),
+  /** Current native theme source. */
+  getTheme: () => ipcRenderer.invoke('desktop:get-native-theme'),
+  /** Listen for theme changes from the main process. */
+  onThemeChanged: (callback) => {
+    const handler = (_event, source) => callback(source)
+    ipcRenderer.on('theme-changed', handler)
+    return () => ipcRenderer.removeListener('theme-changed', handler)
+  },
 })
