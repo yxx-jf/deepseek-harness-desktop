@@ -247,10 +247,34 @@ function wireDesktopBridge(): void {
       if (!result.ok) return { ok: false, error: result.message }
       // Read the bundle name from package.json.
       let bundleName = ''
+      let pkg: { name?: unknown; main?: unknown; scripts?: { build?: unknown } } | undefined = undefined
       try {
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown }
+        pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; main?: unknown; scripts?: { build?: unknown } }
         bundleName = typeof pkg.name === 'string' ? pkg.name : ''
       } catch { /* ignore */ }
+      // 如果插件的主入口文件不存在，尝试构建（npm install + build）
+      const mainEntry = pkg && typeof pkg.main === 'string' ? pkg.main : 'lib/index.js'
+      if (!existsSync(join(bundlePath, mainEntry))) {
+        console.log(`desktop plugin build: ${bundleName} — main entry "${mainEntry}" missing, installing deps…`)
+        // 先安装依赖
+        const installResult = await runCommand('npm', ['install', '--ignore-scripts'], { cwd: bundlePath })
+        if (installResult.code !== 0) {
+          console.warn(`desktop plugin build: npm install failed (${installResult.stderr.slice(0, 200)}), trying pnpm…`)
+          await runCommand('pnpm', ['install', '--ignore-scripts'], { cwd: bundlePath }).catch(() => {})
+        }
+        // 如果有 build 脚本则执行
+        if (pkg && pkg.scripts && typeof pkg.scripts.build === 'string') {
+          console.log(`desktop plugin build: running "npm run build" for ${bundleName}…`)
+          const buildResult = await runCommand('npm', ['run', 'build'], { cwd: bundlePath })
+          if (buildResult.code !== 0) {
+            console.warn(`desktop plugin build: npm run build failed, trying pnpm run build…`)
+            await runCommand('pnpm', ['run', 'build'], { cwd: bundlePath }).catch(() => {})
+          }
+        } else {
+          console.log(`desktop plugin build: no build script for ${bundleName}, trying npm install with scripts…`)
+          await runCommand('npm', ['install'], { cwd: bundlePath }).catch(() => {})
+        }
+      }
       const subs = readSubscriptions()
       if (subs[repoUrl] !== undefined) {
         subs[repoUrl].enabledBundle = bundleName

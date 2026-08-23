@@ -263,6 +263,56 @@ window.addEventListener('unhandledrejection', (e) => {
   diag(t('js.promiseError') + '：' + String(e && e.reason), 'err')
 })
 
+/* ─────────────────────── Markdown renderer ────────────────────── */
+
+/** Simple inline markdown → HTML renderer. Safe: escapes HTML first. */
+function renderMarkdown(text) {
+  if (!text) return ''
+  // Escape HTML entities
+  let h = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  // Code blocks (```) — must happen before other inline transforms
+  h = h.replace(/```([\s\S]*?)```/g, (_m, code) => {
+    return '<pre><code>' + code.trim() + '</code></pre>'
+  })
+  // Headings
+  h = h.replace(/^##### (.+)$/gm, '<h5>$1</h5>')
+  h = h.replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+  h = h.replace(/^### (.+)$/gm, '<h3>$1</h3>')
+  h = h.replace(/^## (.+)$/gm, '<h2>$1</h2>')
+  h = h.replace(/^# (.+)$/gm, '<h1>$1</h1>')
+  // Bold / italic
+  h = h.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  h = h.replace(/\*(.+?)\*/g, '<em>$1</em>')
+  h = h.replace(/___(.+?)___/g, '<strong><em>$1</em></strong>')
+  h = h.replace(/__(.+?)__/g, '<strong>$1</strong>')
+  h = h.replace(/_(.+?)_/g, '<em>$1</em>')
+  // Inline code
+  h = h.replace(/`([^`]+)`/g, '<code>$1</code>')
+  // Links
+  h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+  // Unordered lists
+  h = h.replace(/^[\*\-]\s+(.+)$/gm, '<li>$1</li>')
+  h = h.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+  // Ordered lists
+  h = h.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
+  h = h.replace(/(<li>.*<\/li>\n?)+/g, '<ol>$&</ol>')
+  // Horizontal rules
+  h = h.replace(/^---+/gm, '<hr>')
+  // Paragraphs: double newlines
+  h = h.replace(/\n\n+/g, '</p><p>')
+  h = '<p>' + h + '</p>'
+  // Clean up nested paragraphs around block elements
+  h = h.replace(/<p><(\/?(?:ul|ol|li|h[1-5]|pre|hr|div))>/g, '<$1>')
+  h = h.replace(/<(\/?(?:ul|ol|li|h[1-5]|pre|hr|div))><\/p>/g, '<$1>')
+  // Single line breaks within inline text (not in blocks)
+  h = h.replace(/\n/g, '<br>')
+  return h
+}
+
 /** Active tab: 'community' | 'installed'. */
 let activeTab = 'community'
 
@@ -332,9 +382,27 @@ async function searchPage(page) {
     if (!result.ok) { errorBox(result.error || t('diag.searchFailed')); diag(t('diag.searchFailed') + '：' + (result.error || ''), 'err'); return }
     const repos = result.repos || []
     const totalCount = result.totalCount
+    // 批量验证所有仓库，用于排序（已验证的排前面）
+    diag(t('diag.searching', { q: '' }) + ' — 验证中…')
+    const checks = await Promise.allSettled(repos.map(r => api.checkBundle(r.fullName, r.defaultBranch)))
+    const verifiedIds = new Set()
+    repos.forEach((r, i) => {
+      const vr = checks[i]
+      if (vr.status === 'fulfilled' && vr.value.ok && vr.value.reachable && vr.value.verified) {
+        verifiedIds.add(r.id)
+      }
+    })
+    // 排序：已验证的排前面，其余保持原有顺序
+    repos.sort((a, b) => {
+      const va = verifiedIds.has(a.id)
+      const vb = verifiedIds.has(b.id)
+      if (va && !vb) return -1
+      if (!va && vb) return 1
+      return 0
+    })
     const totalTxt = totalCount ? t('diag.totalSuffix', { n: totalCount }) : ''
     diag(t('diag.searchDone', { s: elapsed, n: repos.length, t: totalTxt }), 'ok')
-    renderRepos(repos, totalCount)
+    renderRepos(repos, totalCount, verifiedIds)
   } catch (e) {
     diag(t('diag.loadFailed') + '：' + String(e), 'err')
     errorBox(t('error.loadFailed', { e: String(e) }))
@@ -355,7 +423,7 @@ function updatePager(totalCount, repoCount) {
   els.pageNext.disabled = !hasMore
 }
 
-function renderRepos(repos, totalCount) {
+function renderRepos(repos, totalCount, verifiedIds) {
   if (!Array.isArray(repos) || repos.length === 0) {
     showEmpty(t('list.noResults'))
     updatePager(0, 0)
@@ -378,6 +446,13 @@ function renderRepos(repos, totalCount) {
     stars.className = 'stars'
     stars.textContent = String(repo.stars)
     nameLine.appendChild(stars)
+    // 已验证标记（已批量排序，直接从 verifiedIds 取）
+    if (verifiedIds && verifiedIds.has(repo.id)) {
+      const badge = document.createElement('span')
+      badge.className = 'status enabled'
+      badge.textContent = t('repo.verified')
+      nameLine.appendChild(badge)
+    }
     const desc = document.createElement('div')
     desc.className = 'desc'
     desc.textContent = repo.description || t('modal.noDesc')
@@ -405,9 +480,6 @@ function renderRepos(repos, totalCount) {
     row.appendChild(info)
     row.appendChild(actions)
     els.list.appendChild(row)
-
-    // 异步验证 dsh.bundle，不阻塞显示
-    verifyBundle(repo, row)
   }
   updatePager(totalCount, repos.length)
 }
@@ -634,8 +706,8 @@ function openDetail(repo) {
   // Status
   els.mdStatus.textContent = ''
   els.mdStatus.className = 'md-status'
-  // README
-  els.mdReadme.textContent = t('modal.readmeLoading')
+  // README (placeholder)
+  els.mdReadme.innerHTML = t('modal.readmeLoading')
   // Subscribe button
   updateDetailSubscribeBtn(repo)
 
@@ -659,30 +731,30 @@ function openDetail(repo) {
       readmeEn = result.readmeEn || null
       // 默认显示中文，没有中文则显示英文
       if (readmeZh) {
-        els.mdReadme.textContent = readmeZh
+        els.mdReadme.innerHTML = renderMarkdown(readmeZh)
         readmeLang = 'zh'
         if (readmeEn) els.readmeLangBtn.classList.add('show')
       } else if (readmeEn) {
-        els.mdReadme.textContent = readmeEn
+        els.mdReadme.innerHTML = renderMarkdown(readmeEn)
         readmeLang = 'en'
       } else {
-        els.mdReadme.textContent = t('modal.readmeError')
+        els.mdReadme.innerHTML = t('modal.readmeError')
       }
     } else {
-      els.mdReadme.textContent = t('modal.readmeError')
+      els.mdReadme.innerHTML = t('modal.readmeError')
     }
   }).catch(() => {
     if (detailRepo !== repo) return
-    els.mdReadme.textContent = t('modal.readmeFail')
+    els.mdReadme.innerHTML = t('modal.readmeFail')
   })
 }
 
 function toggleReadmeLang() {
   if (readmeLang === 'zh' && readmeEn) {
-    els.mdReadme.textContent = readmeEn
+    els.mdReadme.innerHTML = renderMarkdown(readmeEn)
     readmeLang = 'en'
   } else if (readmeLang === 'en' && readmeZh) {
-    els.mdReadme.textContent = readmeZh
+    els.mdReadme.innerHTML = renderMarkdown(readmeZh)
     readmeLang = 'zh'
   }
 }
