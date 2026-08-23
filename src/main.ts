@@ -195,6 +195,14 @@ function wireDesktopBridge(): void {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   })
+  ipcMain.handle('desktop:plugin-bundle-check', async (_event, fullName: string, defaultBranch: string): Promise<{ ok: true; reachable: boolean; verified: boolean } | { ok: false; error: string }> => {
+    try {
+      const result = await dshBundleCheck(fullName, defaultBranch)
+      return { ok: true, reachable: result.reachable, verified: result.verified }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
   ipcMain.handle('desktop:plugin-subscriptions', async (): Promise<{ ok: true; subscriptions: Record<string, PluginSubscription> }> => {
     return { ok: true, subscriptions: readSubscriptions() }
   })
@@ -627,6 +635,32 @@ async function fetchTopic(topic: string, q: string): Promise<GitHubRepo[]> {
     searchErrors.set(`${topic}:${q}`, reasons)
     return []
   }
+}
+
+/**
+ * Verify a GitHub repo exposes a valid `dsh.bundle.patch` in its package.json.
+ * Uses the same direct + mirror strategy as the search so mainland networks pass.
+ * `reachable:false` means no candidate (direct or mirror) could be fetched —
+ * the caller should NOT treat that as "not a plugin", just skip the filter.
+ */
+async function dshBundleCheck(fullName: string, defaultBranch: string): Promise<{ reachable: boolean; verified: boolean }> {
+  for (const branch of [...new Set([defaultBranch, 'main', 'master'].filter(Boolean))]) {
+    const original = `https://raw.githubusercontent.com/${fullName}/${branch}/package.json`
+    const attempts = mirrorUrlCandidates(original).map(async (url): Promise<boolean> => {
+      const response = await fetchWithTimeout(url, GITHUB_ATTEMPT_TIMEOUT_MS)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const pkg = await response.json() as { dsh?: { bundle?: { patch?: unknown } } }
+      return Boolean(pkg.dsh?.bundle?.patch)
+    })
+    try {
+      // First candidate that resolves without throwing wins the race.
+      const verdict = await Promise.any(attempts)
+      return { reachable: true, verified: verdict }
+    } catch {
+      // This branch failed everywhere; try the next branch name.
+    }
+  }
+  return { reachable: false, verified: false }
 }
 
 /** Resolve the dsh CLI entry the desktop app uses (development checkout or packaged runtime). */

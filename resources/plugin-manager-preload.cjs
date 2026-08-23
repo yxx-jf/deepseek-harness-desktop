@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('desktop', {
   quitApp: () => ipcRenderer.invoke('desktop:quit'),
   /** Search GitHub for dsh plugins by category. */
   searchPlugins: (category, query) => ipcRenderer.invoke('desktop:plugin-search', category, query),
+  /** Check whether a GitHub repo exposes a valid dsh.bundle (via main-process mirrors). */
+  checkBundle: (fullName, defaultBranch) => ipcRenderer.invoke('desktop:plugin-bundle-check', fullName, defaultBranch),
   /** List all subscriptions. */
   listSubscriptions: () => ipcRenderer.invoke('desktop:plugin-subscriptions'),
   /** Subscribe (clone) a plugin repo by URL. */

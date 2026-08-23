@@ -8,6 +8,9 @@
 
 /* ─────────────────────── Theme sync ────────────────────── */
 
+/** Bridge exposed by the sandboxed preload. Declared FIRST so nothing below hits the TDZ. */
+const api = window.desktop
+
 /** Apply theme from the query param or the native theme API. */
 async function applyTheme(source) {
   const isDark = source === 'dark' || (source === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
@@ -57,8 +60,6 @@ window.addEventListener('unhandledrejection', (e) => {
   diag('未处理的 Promise 异常：' + String(e && e.reason), 'err')
 })
 
-const api = window.desktop
-
 /** Active tab: 'community' | 'installed'. */
 let activeTab = 'community'
 
@@ -93,20 +94,21 @@ function errorBox(text) {
 
 /* ─────────────────────── GitHub browse (community) ────────────────────── */
 
-/** Quick check whether a GitHub repo has a valid dsh.bundle in its package.json. */
+/** Quick check whether a GitHub repo has a valid dsh.bundle in its package.json.
+ *  Runs in the main process with the same direct+mirror strategy as the search,
+ *  so mainland networks work. If the check itself is unreachable we are lenient
+ *  (keep the repo) instead of wrongly hiding it. */
 async function hasDshBundle(repo) {
-  // Try the repo's default branch first, then fallback to main/master.
-  const branches = [repo.defaultBranch, 'main', 'master'].filter(Boolean)
-  for (const branch of [...new Set(branches)]) {
-    try {
-      const url = 'https://raw.githubusercontent.com/' + repo.fullName + '/' + branch + '/package.json'
-      const res = await fetch(url, { signal: AbortSignal.timeout(5000) })
-      if (!res.ok) continue
-      const pkg = await res.json()
-      if (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) return true
-    } catch {}
+  try {
+    const result = await api.checkBundle(repo.fullName, repo.defaultBranch)
+    if (result.ok) {
+      if (result.reachable) return result.verified
+      return true // 无法验证（网络不可达）时放行，避免误杀
+    }
+    return true
+  } catch {
+    return true
   }
-  return false
 }
 
 let searchTimer = null
