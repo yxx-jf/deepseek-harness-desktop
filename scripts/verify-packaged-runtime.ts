@@ -76,19 +76,29 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
   }
 
   // Patch the native path opener so that .yaml/.yml/.json files (which
-  // commonly have no file association on Windows) are opened with Notepad
-  // instead of Invoke-Item, which silently does nothing for unassociated types.
+  // commonly have no file association on Windows) are opened with Notepad,
+  // launched fire-and-forget (Start-Process) so the openDocument request does
+  // not hang on a long-lived GUI process.
   const openerPath = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'types', 'native-path-opener.js')
   if (existsSync(openerPath)) {
-    let text = readFileSync(openerPath, 'utf8')
-    const oldFn = 'async function openWindowsPath(path, signal, run) {\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-    const newFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'notepad.exe\', [path], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-    if (text.includes(oldFn)) {
-      text = text.replace(oldFn, newFn)
-      writeFileSync(openerPath, text)
-      console.log('afterPack: patched native-path-opener for text file types')
-    } else {
-      console.log('afterPack: native-path-opener openWindowsPath signature mismatch (skipped)')
+    const text = readFileSync(openerPath, 'utf8')
+    // If the patch is absent (both the pristine Invoke-Item form and any
+    // intermediate forms lack the final Start-Process variant), rewrite the
+    // openWindowsPath function block wholesale.
+    const marker = 'Start-Process -FilePath notepad.exe'
+    if (!text.includes(marker)) {
+      // (Pristine) function body without the extension special-case.
+      const pristineFn = 'async function openWindowsPath(path, signal, run) {\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      // (Intermediate) blocking notepad spawn.
+      const blockingFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'notepad.exe\', [path], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const finalFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Fire-and-forget: the editor is a long-lived GUI process; waiting on\n        // it would hang the openDocument request until the user closes it.\n        await run(\'powershell.exe\', [\n            \'-NoProfile\',\n            \'-Command\',\n            \`Start-Process -FilePath notepad.exe -ArgumentList \${powershellLiteral(path)}\`,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
+      const oldBody = text.includes(blockingFn) ? blockingFn : (text.includes(pristineFn) ? pristineFn : undefined)
+      if (oldBody !== undefined) {
+        writeFileSync(openerPath, text.replace(oldBody, finalFn))
+        console.log('afterPack: patched native-path-opener for text file types')
+      } else {
+        console.log('afterPack: native-path-opener openWindowsPath signature mismatch (skipped)')
+      }
     }
   }
 
