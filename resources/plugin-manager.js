@@ -10,6 +10,171 @@
 /** Bridge exposed by the sandboxed preload. Declared FIRST so nothing below hits the TDZ. */
 const api = window.desktop
 
+/* ─────────────────────── i18n (zh/en) ────────────────────── */
+
+const I18N = {
+  zh: {
+    'app.title': '🐋 插件管理',
+    'app.tip': '浏览 · 订阅 · 启用 · 停用 · 卸载',
+    'tab.community': '社区',
+    'tab.installed': '已安装',
+    'search.placeholder': '搜索插件…（按 ⭐ 热度降序）',
+    'hint.community': 'DSH 社区插件',
+    'pager.prev': '‹ 上一页',
+    'pager.next': '下一页 ›',
+    'pager.info': '第 {n} 页',
+    'diag.started': '启动中…',
+    'loading': '加载中…',
+    'banner.text': '插件配置已更新，需要重启应用才能生效。',
+    'restart': '立即重启',
+    'modal.readmeLabel': '📖 README',
+    'modal.readmeLoading': '加载中…',
+    'modal.close': '关闭',
+    'modal.readmeError': '（无 README 或加载失败）',
+    'modal.readmeFail': '（加载 README 失败）',
+    'modal.verified': '✓ 已验证 DSH 插件',
+    'modal.notVerified': '未验证（可能不是 DSH 插件）',
+    'modal.noDesc': '（无描述）',
+    'status.enabled': '已启用',
+    'status.subscribedDisabled': '已订阅 · 未启用',
+    'repo.subscribed': '✓ 已订阅',
+    'repo.subscribedTitle': '已订阅，可在「已安装」页启用',
+    'actions.subscribe': '订阅',
+    'repo.verified': '✓ 已验证',
+    'list.noResults': '没有搜索到插件。试试其他关键词？',
+    'list.noSubscriptions': '还没有订阅任何插件。去「社区」页浏览并订阅吧。',
+    'diag.searching': '正在搜索社区插件{q}…',
+    'diag.searchDone': '搜索完成（{s}s），{n} 个仓库{t}。已验证的插件会显示「已验证」标记',
+    'diag.totalSuffix': '（共约 {n} 个）',
+    'diag.searchFailed': '搜索失败',
+    'diag.loadFailed': '加载失败',
+    'error.loadFailed': '加载失败：{e}。请检查网络后重试。',
+    'log.subscribing': '订阅 {name}…',
+    'log.subscribeOk': '订阅成功 ✓（文件已下载，去「已安装」页启用）',
+    'log.subscribeFail': '订阅失败',
+    'log.subscribeError': '订阅异常',
+    'log.loadSubsError': '读取订阅失败',
+    'log.noCandidate': '【{name}】未找到可启用的插件包：该仓库可能不是 DSH 插件包，或 clone 已被删除',
+    'log.enableFlowError': '启用流程异常',
+    'log.enabling': '启用 {name}（{path}）…',
+    'log.enableFail': '启用失败',
+    'log.enableOk': '启用成功 ✓，重启后生效',
+    'log.enableError': '启用异常',
+    'log.disabling': '停用 {name}…',
+    'log.disableFail': '停用失败',
+    'log.disableOk': '已停用（文件保留，重启后失效）',
+    'log.disableError': '停用异常',
+    'log.uninstalling': '卸载 {url}…',
+    'log.uninstallFail': '卸载失败',
+    'log.uninstallOk': '已卸载（删除订阅与本地文件）',
+    'log.uninstallError': '卸载异常',
+    'actions.stop': '停用',
+    'actions.enable': '启用',
+    'actions.uninstall': '卸载',
+    'js.loaded': 'JS 已加载。desktop API：{s}',
+    'js.apiPresent': '存在',
+    'js.apiMissing': '缺失',
+    'js.ready': '插件管理已就绪',
+    'js.initError': '初始化异常',
+    'js.error': 'JS 错误',
+    'js.promiseError': '未处理的 Promise 异常',
+    'timeout.label': '搜索请求',
+    'timeout.msg': '{label} 超时（{s}s）',
+  },
+  en: {
+    'app.title': '🐋 Plugin Manager',
+    'app.tip': 'Browse · Subscribe · Enable · Disable · Uninstall',
+    'tab.community': 'Community',
+    'tab.installed': 'Installed',
+    'search.placeholder': 'Search plugins… (by ⭐ stars)',
+    'hint.community': 'DSH Community Plugins',
+    'pager.prev': '‹ Prev',
+    'pager.next': 'Next ›',
+    'pager.info': 'Page {n}',
+    'diag.started': 'Starting…',
+    'loading': 'Loading…',
+    'banner.text': 'Plugin config changed — restart the app to apply.',
+    'restart': 'Restart Now',
+    'modal.readmeLabel': '📖 README',
+    'modal.readmeLoading': 'Loading…',
+    'modal.close': 'Close',
+    'modal.readmeError': '(No README or failed to load)',
+    'modal.readmeFail': '(Failed to load README)',
+    'modal.verified': '✓ Verified DSH plugin',
+    'modal.notVerified': 'Unverified (may not be a DSH plugin)',
+    'modal.noDesc': '(no description)',
+    'status.enabled': 'Enabled',
+    'status.subscribedDisabled': 'Subscribed · Disabled',
+    'repo.subscribed': '✓ Subscribed',
+    'repo.subscribedTitle': 'Subscribed — enable in “Installed” tab',
+    'actions.subscribe': 'Subscribe',
+    'repo.verified': '✓ Verified',
+    'list.noResults': 'No plugins found. Try another keyword?',
+    'list.noSubscriptions': 'No subscriptions yet. Browse the Community tab to subscribe.',
+    'diag.searching': 'Searching community plugins{q}…',
+    'diag.searchDone': 'Search done ({s}s), {n} repos{t}. Verified plugins show a “✓ Verified” badge',
+    'diag.totalSuffix': '(~{n} total)',
+    'diag.searchFailed': 'Search failed',
+    'diag.loadFailed': 'Failed to load',
+    'error.loadFailed': 'Failed to load: {e}. Check your network and retry.',
+    'log.subscribing': 'Subscribing to {name}…',
+    'log.subscribeOk': 'Subscribed ✓ (files downloaded — enable in “Installed”)',
+    'log.subscribeFail': 'Subscribe failed',
+    'log.subscribeError': 'Subscribe error',
+    'log.loadSubsError': 'Failed to read subscriptions',
+    'log.noCandidate': '[{name}] No installable plugin package found: repo may not be a DSH plugin, or the clone was deleted',
+    'log.enableFlowError': 'Enable flow error',
+    'log.enabling': 'Enabling {name} ({path})…',
+    'log.enableFail': 'Enable failed',
+    'log.enableOk': 'Enabled ✓ — takes effect after restart',
+    'log.enableError': 'Enable error',
+    'log.disabling': 'Disabling {name}…',
+    'log.disableFail': 'Disable failed',
+    'log.disableOk': 'Disabled (files kept, inactive after restart)',
+    'log.disableError': 'Disable error',
+    'log.uninstalling': 'Uninstalling {url}…',
+    'log.uninstallFail': 'Uninstall failed',
+    'log.uninstallOk': 'Uninstalled (subscription & local files removed)',
+    'log.uninstallError': 'Uninstall error',
+    'actions.stop': 'Disable',
+    'actions.enable': 'Enable',
+    'actions.uninstall': 'Uninstall',
+    'js.loaded': 'JS loaded. desktop API: {s}',
+    'js.apiPresent': 'present',
+    'js.apiMissing': 'missing',
+    'js.ready': 'Plugin Manager ready',
+    'js.initError': 'Initialization error',
+    'js.error': 'JS error',
+    'js.promiseError': 'Unhandled promise rejection',
+    'timeout.label': 'Search request',
+    'timeout.msg': '{label} timeout ({s}s)',
+  },
+}
+
+let lang = 'zh'
+function t(key, vars) {
+  const map = I18N[lang] || I18N.zh
+  let s = map[key] !== undefined ? map[key] : (I18N.zh[key] !== undefined ? I18N.zh[key] : key)
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      s = s.split('{' + k + '}').join(String(v))
+    }
+  }
+  return s
+}
+
+function loadLang() {
+  try { return localStorage.getItem('dsh-plugin-manager-lang') || 'zh' } catch { return 'zh' }
+}
+function saveLang(l) {
+  try { localStorage.setItem('dsh-plugin-manager-lang', l) } catch { /* ignore */ }
+}
+function toggleLang() {
+  lang = lang === 'zh' ? 'en' : 'zh'
+  saveLang(lang)
+  applyI18n()
+}
+
 /** Apply theme from the query param or the native theme API. */
 async function applyTheme(source) {
   const isDark = source === 'dark' || (source === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
@@ -57,6 +222,36 @@ const els = {
   mdClose: document.getElementById('mdClose'),
   mdCloseBtn: document.getElementById('mdCloseBtn'),
   mdSubscribeBtn: document.getElementById('mdSubscribeBtn'),
+  langBtn: document.getElementById('langBtn'),
+}
+
+/** Apply the current language to every data-i18n element and refresh dynamic text.
+ *  reloadList=false 用于首次加载（随后会调 switchTab 触发搜索）。 */
+function applyI18n(reloadList = true) {
+  document.documentElement.lang = lang
+  if (els.langBtn) {
+    els.langBtn.textContent = lang === 'zh' ? 'EN' : '中文'
+    els.langBtn.title = lang === 'zh' ? 'Switch to English' : '切换到中文'
+  }
+  for (const el of document.querySelectorAll('[data-i18n]')) {
+    const raw = el.getAttribute('data-i18n')
+    const sep = raw.indexOf('|')
+    const key = sep >= 0 ? raw.slice(0, sep) : raw
+    const attr = sep >= 0 ? raw.slice(sep + 1) : ''
+    const val = t(key)
+    if (attr === 'placeholder') el.placeholder = val
+    else el.textContent = val
+  }
+  document.title = t('app.title') + ' · DeepSeek Harness'
+  if (activeTab === 'community') {
+    els.hint.textContent = t('hint.community')
+    els.search.placeholder = t('search.placeholder')
+    els.pager.classList.add('show')
+    // 重新加载列表让按钮/徽章等动态文本跟随新语言（保留当前页）
+    if (reloadList) searchPage(currentPage)
+  }
+  if (detailRepo) openDetail(detailRepo)
+  else if (reloadList && activeTab === 'installed') renderInstalled()
 }
 
 function diag(msg, cls) {
@@ -68,10 +263,10 @@ function diag(msg, cls) {
 
 // Surface any runtime error in the visible diag bar (and the log).
 window.addEventListener('error', (e) => {
-  diag('JS 错误：' + (e && e.message ? e.message : String(e)), 'err')
+  diag(t('js.error') + '：' + (e && e.message ? e.message : String(e)), 'err')
 })
 window.addEventListener('unhandledrejection', (e) => {
-  diag('未处理的 Promise 异常：' + String(e && e.reason), 'err')
+  diag(t('js.promiseError') + '：' + String(e && e.reason), 'err')
 })
 
 /** Active tab: 'community' | 'installed'. */
@@ -94,12 +289,12 @@ function log(msg, cls = 'info') {
 
 /** Human-friendly status text for a subscription. */
 function subStatus(sub) {
-  if (sub.enabledBundle) return { text: '已启用', cls: 'enabled' }
-  return { text: '已订阅 · 未启用', cls: 'disabled' }
+  if (sub.enabledBundle) return { text: t('status.enabled'), cls: 'enabled' }
+  return { text: t('status.subscribedDisabled'), cls: 'disabled' }
 }
 
 function setLoading() {
-  els.list.innerHTML = '<div class="empty">加载中…</div>'
+  els.list.innerHTML = '<div class="empty">' + t('loading') + '</div>'
 }
 
 function showEmpty(text) {
@@ -116,7 +311,7 @@ let searchTimer = null
 /** Wrap an IPC promise with a hard timeout so a stalled fetch can't hang the UI. */
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(label + ' 超时（' + (ms / 1000) + 's）')), ms)
+    const timer = setTimeout(() => reject(new Error(t('timeout.msg', { label: label || '', s: (ms / 1000) }))), ms)
     promise.then(v => { clearTimeout(timer); resolve(v) }, e => { clearTimeout(timer); reject(e) })
   })
 }
@@ -135,24 +330,29 @@ async function searchPage(page) {
   currentPage = page
   setLoading()
   const query = currentQuery
-  diag('正在搜索社区插件' + (query ? '：' + query : '') + '…')
+  diag(t('diag.searching', { q: query ? '：' + query : '' }))
   const started = Date.now()
   try {
-    const result = await withTimeout(api.searchPlugins('community', query, page), 15000, '搜索请求')
+    const result = await withTimeout(api.searchPlugins('community', query, page), 15000, t('timeout.label'))
     const elapsed = ((Date.now() - started) / 1000).toFixed(1)
-    if (!result.ok) { errorBox(result.error || '搜索失败'); diag('搜索失败：' + (result.error || ''), 'err'); return }
+    if (!result.ok) { errorBox(result.error || t('diag.searchFailed')); diag(t('diag.searchFailed') + '：' + (result.error || ''), 'err'); return }
     const repos = result.repos || []
     const totalCount = result.totalCount
-    diag('搜索完成（' + elapsed + 's），' + repos.length + ' 个仓库' + (totalCount ? '（共约 ' + totalCount + ' 个）' : '') + '。已验证的插件会显示「已验证」标记', 'ok')
+    const totalTxt = totalCount ? t('diag.totalSuffix', { n: totalCount }) : ''
+    diag(t('diag.searchDone', { s: elapsed, n: repos.length, t: totalTxt }), 'ok')
     renderRepos(repos, totalCount)
   } catch (e) {
-    diag('加载失败：' + String(e), 'err')
-    errorBox('加载失败：' + String(e) + '。请检查网络后重试。')
+    diag(t('diag.loadFailed') + '：' + String(e), 'err')
+    errorBox(t('error.loadFailed', { e: String(e) }))
   }
 }
 
+function updatePagerText() {
+  if (els.pageInfo) els.pageInfo.textContent = t('pager.info', { n: currentPage })
+}
+
 function updatePager(totalCount, repoCount) {
-  els.pageInfo.textContent = '第 ' + currentPage + ' 页'
+  updatePagerText()
   els.pagePrev.disabled = currentPage <= 1
   // 如果返回少于 30 个，说明已到最后一页
   const hasMore = totalCount !== undefined
@@ -163,7 +363,7 @@ function updatePager(totalCount, repoCount) {
 
 function renderRepos(repos, totalCount) {
   if (!Array.isArray(repos) || repos.length === 0) {
-    showEmpty('没有搜索到插件。试试其他关键词？')
+    showEmpty(t('list.noResults'))
     updatePager(0, 0)
     return
   }
@@ -186,7 +386,7 @@ function renderRepos(repos, totalCount) {
     nameLine.appendChild(stars)
     const desc = document.createElement('div')
     desc.className = 'desc'
-    desc.textContent = repo.description || '（无描述）'
+    desc.textContent = repo.description || t('modal.noDesc')
     const url = document.createElement('div')
     url.className = 'url'
     url.textContent = repo.fullName
@@ -199,11 +399,11 @@ function renderRepos(repos, totalCount) {
     const btn = document.createElement('button')
     if (sub !== undefined) {
       btn.className = 'secondary'
-      btn.textContent = '✓ 已订阅'
+      btn.textContent = t('repo.subscribed')
       btn.disabled = true
-      btn.title = '已订阅，可在「已安装」页启用'
+      btn.title = t('repo.subscribedTitle')
     } else {
-      btn.textContent = '订阅'
+      btn.textContent = t('actions.subscribe')
       btn.addEventListener('click', (e) => { e.stopPropagation(); subscribeRepo(repo, btn) })
     }
     actions.appendChild(btn)
@@ -228,7 +428,7 @@ async function verifyBundle(repo, row) {
     if (verified && row) {
       const badge = document.createElement('span')
       badge.className = 'status enabled'
-      badge.textContent = '✓ 已验证'
+      badge.textContent = t('repo.verified')
       row.querySelector('.name').appendChild(badge)
     }
     return verified
@@ -237,18 +437,18 @@ async function verifyBundle(repo, row) {
 
 async function subscribeRepo(repo, btn) {
   btn.disabled = true
-  log(`订阅 ${repo.fullName}…`)
+  log(t('log.subscribing', { name: repo.fullName }))
   try {
     const result = await api.subscribePlugin(repo.cloneUrl || repo.htmlUrl)
-    if (!result.ok) { log(result.error || '订阅失败', 'err'); btn.disabled = false; return }
-    log('订阅成功 ✓（文件已下载，去「已安装」页启用）', 'ok')
+    if (!result.ok) { log((result.error || t('log.subscribeFail')), 'err'); btn.disabled = false; return }
+    log(t('log.subscribeOk'), 'ok')
     await loadSubscriptions()
     showRestartHint(result.candidates && result.candidates.length > 0)
     // 如详情页打开，更新订阅按钮状态
     updateDetailSubscribeBtn(repo)
     refreshBrowse()
   } catch (e) {
-    log('订阅异常：' + String(e), 'err')
+    log(t('log.subscribeError') + '：' + String(e), 'err')
     btn.disabled = false
   }
 }
@@ -260,7 +460,7 @@ async function loadSubscriptions() {
     const result = await api.listSubscriptions()
     if (result.ok) subscriptions = result.subscriptions || {}
   } catch (e) {
-    log('读取订阅失败：' + String(e), 'err')
+    log(t('log.loadSubsError') + '：' + String(e), 'err')
   }
 }
 
@@ -271,7 +471,7 @@ async function renderInstalled() {
   // Show subscriptions first, then other installed bundles not tied to a subscription.
   els.list.innerHTML = ''
   if (entries.length === 0) {
-    showEmpty('还没有订阅任何插件。去「社区」页浏览并订阅吧。')
+    showEmpty(t('list.noSubscriptions'))
     return
   }
   for (const [repoUrl, sub] of entries) {
@@ -300,20 +500,20 @@ async function renderInstalled() {
     if (sub.enabledBundle) {
       const stop = document.createElement('button')
       stop.className = 'secondary'
-      stop.textContent = '停用'
+      stop.textContent = t('actions.stop')
       stop.addEventListener('click', () => disablePlugin(repoUrl, sub.enabledBundle))
       actions.appendChild(stop)
     } else {
       // Need to pick a candidate bundle to enable. Re-scan from the clone.
       const enable = document.createElement('button')
-      enable.textContent = '启用'
+      enable.textContent = t('actions.enable')
       enable.addEventListener('click', () => enableFlow(repoUrl, sub, enable))
       actions.appendChild(enable)
     }
 
     const uninstall = document.createElement('button')
     uninstall.className = 'danger'
-    uninstall.textContent = '卸载'
+    uninstall.textContent = t('actions.uninstall')
     uninstall.addEventListener('click', () => unsubscribe(repoUrl))
     actions.appendChild(uninstall)
 
@@ -329,7 +529,7 @@ async function enableFlow(repoUrl, sub, btn) {
   try {
     const result = await api.resolvePlugin(sub.clonePath)
     if (!result.ok || !result.candidates || result.candidates.length === 0) {
-      log('【' + sub.repoName + '】未找到可启用的插件包：该仓库可能不是 DSH 插件包，或 clone 已被删除', 'err')
+      log(t('log.noCandidate', { name: sub.repoName }), 'err')
       btn.disabled = false
       return
     }
@@ -347,7 +547,7 @@ async function enableFlow(repoUrl, sub, btn) {
       pick.appendChild(opt)
     }
     const go = document.createElement('button')
-    go.textContent = '启用'
+    go.textContent = t('actions.enable')
     go.addEventListener('click', async () => {
       const chosen = candidates.find(c => c.path === pick.value)
       await enableBundle(repoUrl, chosen)
@@ -358,49 +558,49 @@ async function enableFlow(repoUrl, sub, btn) {
     actions.prepend(pick, go)
     btn.style.display = 'none'
   } catch (e) {
-    log('启用流程异常：' + String(e), 'err')
+    log(t('log.enableFlowError') + '：' + String(e), 'err')
     btn.disabled = false
   }
 }
 
 async function enableBundle(repoUrl, candidate) {
-  log(`启用 ${candidate.name}（${candidate.path}）…`)
+  log(t('log.enabling', { name: candidate.name, path: candidate.path }))
   try {
     const result = await api.enablePlugin(repoUrl, candidate.path)
-    if (!result.ok) { log(result.error || '启用失败', 'err'); return }
-    log('启用成功 ✓，重启后生效', 'ok')
+    if (!result.ok) { log(result.error || t('log.enableFail'), 'err'); return }
+    log(t('log.enableOk'), 'ok')
     showRestartHint(true)
     await renderInstalled()
   } catch (e) {
-    log('启用异常：' + String(e), 'err')
+    log(t('log.enableError') + '：' + String(e), 'err')
   }
 }
 
 async function disablePlugin(repoUrl, bundleName) {
-  log(`停用 ${bundleName}…`)
+  log(t('log.disabling', { name: bundleName }))
   try {
     const result = await api.disablePlugin(repoUrl, bundleName)
-    if (!result.ok) { log(result.error || '停用失败', 'err'); return }
-    log('已停用（文件保留，重启后失效）', 'ok')
+    if (!result.ok) { log(result.error || t('log.disableFail'), 'err'); return }
+    log(t('log.disableOk'), 'ok')
     showRestartHint(true)
     await renderInstalled()
   } catch (e) {
-    log('停用异常：' + String(e), 'err')
+    log(t('log.disableError') + '：' + String(e), 'err')
   }
 }
 
 async function unsubscribe(repoUrl) {
-  log(`卸载 ${repoUrl}…`)
+  log(t('log.uninstalling', { url: repoUrl }))
   try {
     const result = await api.unsubscribePlugin(repoUrl)
-    if (!result.ok) { log(result.error || '卸载失败', 'err'); return }
-    log('已卸载（删除订阅与本地文件）', 'ok')
+    if (!result.ok) { log(result.error || t('log.uninstallFail'), 'err'); return }
+    log(t('log.uninstallOk'), 'ok')
     await loadSubscriptions()
     const dirty = Object.keys(subscriptions).length > 0
     if (dirty) showRestartHint(true)
     renderInstalled()
   } catch (e) {
-    log('卸载异常：' + String(e), 'err')
+    log(t('log.uninstallError') + '：' + String(e), 'err')
   }
 }
 
@@ -418,13 +618,13 @@ function openDetail(repo) {
   els.mdName.textContent = repo.name
   els.mdFullName.textContent = repo.fullName
   els.mdStars.textContent = String(repo.stars)
-  els.mdDesc.textContent = repo.description || '（无描述）'
+  els.mdDesc.textContent = repo.description || t('modal.noDesc')
   // Topics
   els.mdTopics.innerHTML = ''
   if (Array.isArray(repo.topics)) {
-    for (const t of repo.topics) {
+    for (const tagName of repo.topics) {
       const tag = document.createElement('span')
-      tag.textContent = t
+      tag.textContent = tagName
       els.mdTopics.appendChild(tag)
     }
   }
@@ -432,7 +632,7 @@ function openDetail(repo) {
   els.mdStatus.textContent = ''
   els.mdStatus.className = 'md-status'
   // README
-  els.mdReadme.textContent = '加载中…'
+  els.mdReadme.textContent = t('modal.readmeLoading')
   // Subscribe button
   updateDetailSubscribeBtn(repo)
 
@@ -442,9 +642,9 @@ function openDetail(repo) {
   verifyBundle(repo, null).then((verified) => {
     if (detailRepo !== repo) return
     if (verified) {
-      els.mdStatus.innerHTML = '<span class="status enabled">✓ 已验证 DSH 插件</span>'
+      els.mdStatus.innerHTML = '<span class="status enabled">' + t('modal.verified') + '</span>'
     } else {
-      els.mdStatus.innerHTML = '<span class="status disabled">未验证（可能不是 DSH 插件）</span>'
+      els.mdStatus.innerHTML = '<span class="status disabled">' + t('modal.notVerified') + '</span>'
     }
   })
 
@@ -454,11 +654,11 @@ function openDetail(repo) {
     if (result.ok) {
       els.mdReadme.textContent = result.readme
     } else {
-      els.mdReadme.textContent = '（无 README 或加载失败）'
+      els.mdReadme.textContent = t('modal.readmeError')
     }
   }).catch(() => {
     if (detailRepo !== repo) return
-    els.mdReadme.textContent = '（加载 README 失败）'
+    els.mdReadme.textContent = t('modal.readmeFail')
   })
 }
 
@@ -471,11 +671,11 @@ function updateDetailSubscribeBtn(repo) {
   if (!els.mdSubscribeBtn) return
   const sub = repo ? (subscriptions[repo.cloneUrl] || subscriptions[repo.htmlUrl]) : undefined
   if (sub !== undefined) {
-    els.mdSubscribeBtn.textContent = '✓ 已订阅'
+    els.mdSubscribeBtn.textContent = t('modal.subscribed')
     els.mdSubscribeBtn.disabled = true
     els.mdSubscribeBtn.className = 'secondary'
   } else {
-    els.mdSubscribeBtn.textContent = '订阅'
+    els.mdSubscribeBtn.textContent = t('actions.subscribe')
     els.mdSubscribeBtn.disabled = false
     els.mdSubscribeBtn.className = ''
   }
@@ -493,8 +693,8 @@ function switchTab(tab) {
   } else {
     els.toolbar.style.display = 'flex'
     els.pager.classList.add('show')
-    els.hint.textContent = 'DSH 社区插件'
-    els.search.placeholder = '搜索插件…（按 ⭐ 热度降序）'
+    els.hint.textContent = t('hint.community')
+    els.search.placeholder = t('search.placeholder')
     refreshBrowse()
   }
 }
@@ -511,6 +711,9 @@ els.restartBtn.addEventListener('click', () => { api.quitApp() })
 els.pagePrev.addEventListener('click', () => { if (currentPage > 1) searchPage(currentPage - 1) })
 els.pageNext.addEventListener('click', () => { searchPage(currentPage + 1) })
 
+// Language toggle
+els.langBtn.addEventListener('click', toggleLang)
+
 // Detail modal
 els.mdClose.addEventListener('click', closeDetail)
 els.mdCloseBtn.addEventListener('click', closeDetail)
@@ -522,9 +725,11 @@ els.mdSubscribeBtn.addEventListener('click', () => {
 
 // Initial render.
 try {
-  diag('JS 已加载。desktop API：' + (typeof api !== 'undefined' && api !== null ? '存在' : '缺失'), typeof api !== 'undefined' && api !== null ? 'ok' : 'err')
-  log('插件管理已就绪', 'ok')
+  lang = loadLang() === 'en' ? 'en' : 'zh'
+  applyI18n(false)
+  diag(t('js.loaded', { s: (typeof api !== 'undefined' && api !== null) ? t('js.apiPresent') : t('js.apiMissing') }), typeof api !== 'undefined' && api !== null ? 'ok' : 'err')
+  log(t('js.ready'), 'ok')
   switchTab('community')
 } catch (e) {
-  diag('初始化异常：' + String(e), 'err')
+  diag(t('js.initError') + '：' + String(e), 'err')
 }

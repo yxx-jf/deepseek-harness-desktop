@@ -63,6 +63,14 @@
     }
     header .title { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
     header .tip { color: var(--text-secondary); font-size: 12px; margin-left: 10px; }
+    .lang-btn {
+      -webkit-app-region: no-drag;
+      height: 26px; padding: 0 10px; font-size: 12px;
+      background: var(--card-bg); color: var(--text-secondary);
+      border: 1px solid var(--border-light); border-radius: 8px; cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .lang-btn:hover { color: var(--text-primary); border-color: var(--border-medium); }
     .tabs {
       flex: none; display: flex; gap: 4px; padding: 8px 18px 0;
       -webkit-app-region: no-drag;
@@ -234,29 +242,30 @@
 </head>
 <body>
   <header>
-    <div><span class="title">🐋 插件管理</span><span class="tip">浏览 · 订阅 · 启用 · 停用 · 卸载</span></div>
+    <div><span class="title" data-i18n="app.title">🐋 插件管理</span><span class="tip" data-i18n="app.tip">浏览 · 订阅 · 启用 · 停用 · 卸载</span></div>
+    <button class="lang-btn" id="langBtn" data-i18n="langBtnLabel">EN</button>
   </header>
   <nav class="tabs" id="tabs">
-    <button class="tab active" data-tab="community">社区</button>
-    <button class="tab" data-tab="installed">已安装</button>
+    <button class="tab active" data-tab="community" data-i18n="tab.community">社区</button>
+    <button class="tab" data-tab="installed" data-i18n="tab.installed">已安装</button>
   </nav>
   <main>
     <div class="toolbar" id="toolbar">
-      <input id="search" type="text" placeholder="搜索插件…（按 ⭐ 热度降序）" spellcheck="false">
-      <span class="hint" id="hint"></span>
+      <input id="search" type="text" data-i18n="search.placeholder|placeholder" placeholder="搜索插件…（按 ⭐ 热度降序）" spellcheck="false">
+      <span class="hint" id="hint" data-i18n="hint.community"></span>
       <div class="pager" id="pager">
-        <button id="pagePrev" class="secondary" disabled>‹ 上一页</button>
+        <button id="pagePrev" class="secondary" disabled data-i18n="pager.prev">‹ 上一页</button>
         <span class="page-info" id="pageInfo">第 1 页</span>
-        <button id="pageNext" class="secondary">下一页 ›</button>
+        <button id="pageNext" class="secondary" data-i18n="pager.next">下一页 ›</button>
       </div>
     </div>
-    <div class="diag" id="diag">启动中…</div>
-    <div class="list" id="list"><div class="empty" id="loading">加载中…</div></div>
+    <div class="diag" id="diag" data-i18n="diag.started">启动中…</div>
+    <div class="list" id="list"><div class="empty" id="loading" data-i18n="loading">加载中…</div></div>
   </main>
   <div class="bottom">
     <div class="banner" id="restartBanner">
-      <span>插件配置已更新，需要重启应用才能生效。</span>
-      <button id="restartBtn">立即重启</button>
+      <span data-i18n="banner.text">插件配置已更新，需要重启应用才能生效。</span>
+      <button id="restartBtn" data-i18n="restart">立即重启</button>
     </div>
     <div class="log" id="log"></div>
   </div>
@@ -278,12 +287,12 @@
       <div class="modal-body">
         <div class="md-desc" id="mdDesc"></div>
         <div class="md-status" id="mdStatus"></div>
-        <div class="md-readme-label">📖 README</div>
-        <div class="md-readme" id="mdReadme">加载中…</div>
+        <div class="md-readme-label" data-i18n="modal.readmeLabel">📖 README</div>
+        <div class="md-readme" id="mdReadme" data-i18n="modal.readmeLoading">加载中…</div>
       </div>
       <div class="modal-footer">
-        <button class="secondary" id="mdCloseBtn">关闭</button>
-        <button id="mdSubscribeBtn">订阅</button>
+        <button class="secondary" id="mdCloseBtn" data-i18n="modal.close">关闭</button>
+        <button id="mdSubscribeBtn" data-i18n="modal.subscribe">订阅</button>
       </div>
     </div>
   </div>
