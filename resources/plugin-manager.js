@@ -163,17 +163,7 @@ function t(key, vars) {
   return s
 }
 
-function loadLang() {
-  try { return localStorage.getItem('dsh-plugin-manager-lang') || 'zh' } catch { return 'zh' }
-}
-function saveLang(l) {
-  try { localStorage.setItem('dsh-plugin-manager-lang', l) } catch { /* ignore */ }
-}
-function toggleLang() {
-  lang = lang === 'zh' ? 'en' : 'zh'
-  saveLang(lang)
-  applyI18n()
-}
+function loadLang() { return 'zh' }
 
 /** Apply theme from the query param or the native theme API. */
 async function applyTheme(source) {
@@ -222,17 +212,13 @@ const els = {
   mdClose: document.getElementById('mdClose'),
   mdCloseBtn: document.getElementById('mdCloseBtn'),
   mdSubscribeBtn: document.getElementById('mdSubscribeBtn'),
-  langBtn: document.getElementById('langBtn'),
+  readmeLangBtn: document.getElementById('readmeLangBtn'),
 }
 
 /** Apply the current language to every data-i18n element and refresh dynamic text.
  *  reloadList=false 用于首次加载（随后会调 switchTab 触发搜索）。 */
 function applyI18n(reloadList = true) {
   document.documentElement.lang = lang
-  if (els.langBtn) {
-    els.langBtn.textContent = lang === 'zh' ? 'EN' : '中文'
-    els.langBtn.title = lang === 'zh' ? 'Switch to English' : '切换到中文'
-  }
   for (const el of document.querySelectorAll('[data-i18n]')) {
     const raw = el.getAttribute('data-i18n')
     const sep = raw.indexOf('|')
@@ -250,7 +236,15 @@ function applyI18n(reloadList = true) {
     // 重新加载列表让按钮/徽章等动态文本跟随新语言（保留当前页）
     if (reloadList) searchPage(currentPage)
   }
-  if (detailRepo) openDetail(detailRepo)
+  if (detailRepo) {
+    // 语言切换时只更新详情弹窗的静态文本（按钮、状态等），不重新拉 README
+    const repo = detailRepo
+    els.mdName.textContent = repo.name
+    els.mdFullName.textContent = repo.fullName
+    els.mdStars.textContent = String(repo.stars)
+    els.mdDesc.textContent = repo.description || t('modal.noDesc')
+    updateDetailSubscribeBtn(repo)
+  }
   else if (reloadList && activeTab === 'installed') renderInstalled()
 }
 
@@ -612,9 +606,18 @@ function showRestartHint(show) {
 
 /** Currently open repo in the detail modal, or null. */
 let detailRepo = null
+/** README text in both languages, or null. */
+let readmeZh = null
+let readmeEn = null
+/** Which README language is currently shown: 'zh' or 'en'. */
+let readmeLang = 'zh'
 
 function openDetail(repo) {
   detailRepo = repo
+  readmeZh = null
+  readmeEn = null
+  readmeLang = 'zh'
+  els.readmeLangBtn.classList.remove('show')
   els.mdName.textContent = repo.name
   els.mdFullName.textContent = repo.fullName
   els.mdStars.textContent = String(repo.stars)
@@ -648,11 +651,23 @@ function openDetail(repo) {
     }
   })
 
-  // Async README fetch
+  // Async README fetch (both zh and en)
   api.repoReadme(repo.fullName, repo.defaultBranch).then((result) => {
     if (detailRepo !== repo) return
     if (result.ok) {
-      els.mdReadme.textContent = result.readme
+      readmeZh = result.readmeZh || null
+      readmeEn = result.readmeEn || null
+      // 默认显示中文，没有中文则显示英文
+      if (readmeZh) {
+        els.mdReadme.textContent = readmeZh
+        readmeLang = 'zh'
+        if (readmeEn) els.readmeLangBtn.classList.add('show')
+      } else if (readmeEn) {
+        els.mdReadme.textContent = readmeEn
+        readmeLang = 'en'
+      } else {
+        els.mdReadme.textContent = t('modal.readmeError')
+      }
     } else {
       els.mdReadme.textContent = t('modal.readmeError')
     }
@@ -662,8 +677,20 @@ function openDetail(repo) {
   })
 }
 
+function toggleReadmeLang() {
+  if (readmeLang === 'zh' && readmeEn) {
+    els.mdReadme.textContent = readmeEn
+    readmeLang = 'en'
+  } else if (readmeLang === 'en' && readmeZh) {
+    els.mdReadme.textContent = readmeZh
+    readmeLang = 'zh'
+  }
+}
+
 function closeDetail() {
   detailRepo = null
+  readmeZh = null
+  readmeEn = null
   els.modalOverlay.classList.remove('open')
 }
 
@@ -712,7 +739,7 @@ els.pagePrev.addEventListener('click', () => { if (currentPage > 1) searchPage(c
 els.pageNext.addEventListener('click', () => { searchPage(currentPage + 1) })
 
 // Language toggle
-els.langBtn.addEventListener('click', toggleLang)
+// (removed — UI language toggle was a misunderstanding, only README zh/en toggle remains)
 
 // Detail modal
 els.mdClose.addEventListener('click', closeDetail)
@@ -723,9 +750,12 @@ els.mdSubscribeBtn.addEventListener('click', () => {
   subscribeRepo(detailRepo, els.mdSubscribeBtn)
 })
 
+// README language toggle
+els.readmeLangBtn.addEventListener('click', toggleReadmeLang)
+
 // Initial render.
 try {
-  lang = loadLang() === 'en' ? 'en' : 'zh'
+  lang = 'zh'
   applyI18n(false)
   diag(t('js.loaded', { s: (typeof api !== 'undefined' && api !== null) ? t('js.apiPresent') : t('js.apiMissing') }), typeof api !== 'undefined' && api !== null ? 'ok' : 'err')
   log(t('js.ready'), 'ok')

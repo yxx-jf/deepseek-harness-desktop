@@ -63,14 +63,6 @@
     }
     header .title { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
     header .tip { color: var(--text-secondary); font-size: 12px; margin-left: 10px; }
-    .lang-btn {
-      -webkit-app-region: no-drag;
-      height: 26px; padding: 0 10px; font-size: 12px;
-      background: var(--card-bg); color: var(--text-secondary);
-      border: 1px solid var(--border-light); border-radius: 8px; cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .lang-btn:hover { color: var(--text-primary); border-color: var(--border-medium); }
     .tabs {
       flex: none; display: flex; gap: 4px; padding: 8px 18px 0;
       -webkit-app-region: no-drag;
@@ -219,6 +211,16 @@
       font-size: 13px; font-weight: 600; color: var(--text-primary);
       margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
     }
+    .readme-lang-btn {
+      -webkit-app-region: no-drag;
+      height: 24px; padding: 0 8px; font-size: 11px; font-weight: 600;
+      border: 1px solid var(--border-light); border-radius: 6px;
+      background: var(--card-bg); color: var(--text-secondary);
+      cursor: pointer; margin-left: auto; margin-bottom: 8px;
+      transition: all 0.15s ease; display: none;
+    }
+    .readme-lang-btn:hover { color: var(--text-primary); border-color: var(--border-medium); }
+    .readme-lang-btn.show { display: inline-block; }
     .modal-body .md-readme {
       font-size: 12px; line-height: 1.7; color: var(--text-secondary);
       white-space: pre-wrap; word-break: break-word;
@@ -243,7 +245,6 @@
 <body>
   <header>
     <div><span class="title" data-i18n="app.title">🐋 插件管理</span><span class="tip" data-i18n="app.tip">浏览 · 订阅 · 启用 · 停用 · 卸载</span></div>
-    <button class="lang-btn" id="langBtn" data-i18n="langBtnLabel">EN</button>
   </header>
   <nav class="tabs" id="tabs">
     <button class="tab active" data-tab="community" data-i18n="tab.community">社区</button>
@@ -288,6 +289,7 @@
         <div class="md-desc" id="mdDesc"></div>
         <div class="md-status" id="mdStatus"></div>
         <div class="md-readme-label" data-i18n="modal.readmeLabel">📖 README</div>
+        <button class="readme-lang-btn" id="readmeLangBtn">中 / EN</button>
         <div class="md-readme" id="mdReadme" data-i18n="modal.readmeLoading">加载中…</div>
       </div>
       <div class="modal-footer">

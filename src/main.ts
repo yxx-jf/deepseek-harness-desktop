@@ -204,10 +204,10 @@ function wireDesktopBridge(): void {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   })
-  ipcMain.handle('desktop:plugin-repo-readme', async (_event, fullName: string, defaultBranch: string): Promise<{ ok: true; readme: string } | { ok: false; error: string }> => {
+  ipcMain.handle('desktop:plugin-repo-readme', async (_event, fullName: string, defaultBranch: string): Promise<{ ok: true; readmeZh?: string; readmeEn?: string } | { ok: false; error: string }> => {
     try {
-      const readme = await fetchRepoReadme(fullName, defaultBranch)
-      return { ok: true, readme }
+      const { zh, en } = await fetchRepoReadme(fullName, defaultBranch)
+      return { ok: true, readmeZh: zh, readmeEn: en }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -675,23 +675,30 @@ async function dshBundleCheck(fullName: string, defaultBranch: string): Promise<
   return { reachable: false, verified: false }
 }
 
-/** Fetch a GitHub repo's README.md content via mirrors. */
-async function fetchRepoReadme(fullName: string, defaultBranch: string): Promise<string> {
-  const candidates = [...new Set([defaultBranch, 'main', 'master'].filter(Boolean))]
-  for (const branch of candidates) {
-    for (const file of ['README.md', 'readme.md', 'README.markdown', 'Readme.md']) {
-      const original = `https://raw.githubusercontent.com/${fullName}/${branch}/${file}`
-      const attempts = mirrorUrlCandidates(original).map(async (url) => {
-        const response = await fetchWithTimeout(url, GITHUB_ATTEMPT_TIMEOUT_MS)
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        return await response.text()
-      })
-      try {
-        return await Promise.any(attempts)
-      } catch { /* try next file name */ }
+/** Fetch a GitHub repo's README via mirrors, returning Chinese and English versions. */
+async function fetchRepoReadme(fullName: string, defaultBranch: string): Promise<{ zh?: string; en?: string }> {
+  const branches = [...new Set([defaultBranch, 'main', 'master'].filter(Boolean))]
+  const zhFiles = ['README.zh.md', 'README_zh.md', 'README_CN.md', 'readme.zh.md', 'README.zh-CN.md', 'README.zh_CN.md', 'README_中文.md']
+  const enFiles = ['README.md', 'readme.md', 'README.markdown', 'Readme.md']
+
+  async function tryReadme(files: string[]): Promise<string | undefined> {
+    for (const branch of branches) {
+      for (const file of files) {
+        const original = `https://raw.githubusercontent.com/${fullName}/${branch}/${file}`
+        const attempts = mirrorUrlCandidates(original).map(async (url) => {
+          const response = await fetchWithTimeout(url, GITHUB_ATTEMPT_TIMEOUT_MS)
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          return await response.text()
+        })
+        try { return await Promise.any(attempts) } catch { /* try next */ }
+      }
     }
+    return undefined
   }
-  throw new Error('README not found')
+
+  const [zh, en] = await Promise.all([tryReadme(zhFiles), tryReadme(enFiles)])
+  if (!zh && !en) throw new Error('README not found')
+  return { zh, en }
 }
 
 /** Resolve the dsh CLI entry the desktop app uses (development checkout or packaged runtime). */
