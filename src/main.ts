@@ -977,7 +977,16 @@ async function boot(): Promise<void> {
       const p = readFileSync(OPEN_DOC_TMP, 'utf8').trim()
       if (p.length > 0) {
         writeFileSync(OPEN_DOC_TMP, '')
-        void shell.openPath(p)
+        // shell.openPath returns '' on success, error string on failure.
+        // For unassociated file types (.yaml/.yml/.json) it returns an error
+        // and does nothing — fall back to rundll32 OpenAs_RunDLL which shows
+        // the "Open With" dialog.  From the main process (interactive session)
+        // the dialog is visible on the user's desktop.
+        void shell.openPath(p).then((error) => {
+          if (error !== '') {
+            execFile('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', p], { windowsHide: true })
+          }
+        })
       }
     } catch { /* file missing or empty — nothing to open */ }
   }, 800)
