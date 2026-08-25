@@ -1,7 +1,7 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -243,6 +243,8 @@ function wireDesktopBridge(): void {
     try {
       const pkgPath = join(bundlePath, 'package.json')
       if (!existsSync(pkgPath)) return { ok: false, error: '该目录不是有效的插件包（缺少 package.json）' }
+      // 确保 ~/.dsh/node_modules/@deepseek-ai 有运行时 peer 依赖链接
+      ensurePluginRuntimeLinks()
       const result = await runDshPlugin(['add', bundlePath])
       if (!result.ok) return { ok: false, error: result.message }
       // Read the bundle name from package.json.
@@ -252,29 +254,21 @@ function wireDesktopBridge(): void {
         pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; main?: unknown; scripts?: { build?: unknown } }
         bundleName = typeof pkg.name === 'string' ? pkg.name : ''
       } catch { /* ignore */ }
-      // 如果插件的主入口文件不存在，尝试构建（npm install + build）
+      // 如果插件的主入口文件不存在，尝试构建
       const mainEntry = pkg && typeof pkg.main === 'string' ? pkg.main : 'lib/index.js'
       if (!existsSync(join(bundlePath, mainEntry))) {
-        console.log(`desktop plugin build: ${bundleName} — main entry "${mainEntry}" missing, installing deps…`)
-        // 先安装依赖
-        const installResult = await runCommand('npm', ['install', '--ignore-scripts'], { cwd: bundlePath })
-        if (installResult.code !== 0) {
-          console.warn(`desktop plugin build: npm install failed (${installResult.stderr.slice(0, 200)}), trying pnpm…`)
-          await runCommand('pnpm', ['install', '--ignore-scripts'], { cwd: bundlePath }).catch(() => {})
-        }
+        console.log(`desktop plugin build: ${bundleName} — main entry "${mainEntry}" missing, building…`)
+        // 先装依赖（用 pnpm 才能解析 workspace 内的 @deepseek-ai 包）
+        await runCommand('pnpm', ['install', '--ignore-scripts'], { cwd: bundlePath }).catch(() => {})
         // 如果有 build 脚本则执行
         if (pkg && pkg.scripts && typeof pkg.scripts.build === 'string') {
-          console.log(`desktop plugin build: running "npm run build" for ${bundleName}…`)
-          const buildResult = await runCommand('npm', ['run', 'build'], { cwd: bundlePath })
-          if (buildResult.code !== 0) {
-            console.warn(`desktop plugin build: npm run build failed, trying pnpm run build…`)
-            await runCommand('pnpm', ['run', 'build'], { cwd: bundlePath }).catch(() => {})
-          }
-        } else {
-          console.log(`desktop plugin build: no build script for ${bundleName}, trying npm install with scripts…`)
-          await runCommand('npm', ['install'], { cwd: bundlePath }).catch(() => {})
+          console.log(`desktop plugin build: running "pnpm run build" for ${bundleName}…`)
+          await runCommand('pnpm', ['run', 'build'], { cwd: bundlePath }).catch(() => {})
         }
       }
+      // 确保插件的所有依赖在 profile 中已解析（如 @deepseek-ai/dsh-session 等 workspace 包）
+      console.log(`desktop plugin: running pnpm install in profile to resolve ${bundleName} dependencies…`)
+      await runCommand('pnpm', ['install', '--no-frozen-lockfile'], { cwd: WEB_PROFILE_DIR }).catch(() => {})
       const subs = readSubscriptions()
       if (subs[repoUrl] !== undefined) {
         subs[repoUrl].enabledBundle = bundleName
@@ -775,6 +769,50 @@ async function runDshPlugin(pnpmArgs: string[]): Promise<{ ok: boolean; message:
   return { ok: true, message: output }
 }
 
+/** Directory holding the runtime's shared `@deepseek-ai/*` packages (used as plugin peer deps). */
+function runtimeDeepSeekAiScope(): string {
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, 'host/node_modules/@deepseek-ai')]
+    : [
+        join(DESKTOP_DIR, 'upstream/apps/cli/node_modules/@deepseek-ai'),
+        join(DESKTOP_DIR, 'upstream/node_modules/@deepseek-ai'),
+      ]
+  return candidates.find(p => existsSync(p)) ?? candidates[0]
+}
+
+/**
+ * Junction the runtime's `@deepseek-ai/*` packages into `~/.dsh/node_modules/@deepseek-ai`
+ * so third-party plugins (cloned into ~/.dsh/plugins) can resolve their peer deps
+ * (`@deepseek-ai/dsh-session` etc.) by walking up the node_modules tree — exactly how
+ * the Host CLI itself resolves its workspace packages. Idempotent: existing junctions
+ * are left untouched.
+ */
+function ensurePluginRuntimeLinks(): void {
+  const scope = runtimeDeepSeekAiScope()
+  if (!existsSync(scope)) return
+  const target = join(DSH_HOME, 'node_modules/@deepseek-ai')
+  try {
+    mkdirSync(join(DSH_HOME, 'node_modules'), { recursive: true })
+    mkdirSync(target, { recursive: true })
+    let created = 0
+    for (const entry of readdirSync(scope, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+      const src = join(scope, entry.name)
+      const dst = join(target, entry.name)
+      if (existsSync(dst)) continue
+      try {
+        symlinkSync(realpathSync(src), dst, 'junction')
+        created++
+      } catch (error) {
+        console.warn(`desktop plugin runtime link: failed ${entry.name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (created > 0) console.log(`desktop plugin runtime link: linked ${created} @deepseek-ai package(s) into ${target}`)
+  } catch (error) {
+    console.warn(`desktop plugin runtime link: setup failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /** Derive a safe local folder name from a git clone URL. */
 function repoFolderName(url: string): string {
   const cleaned = url.replace(/^https?:\/\//i, '').replace(/[\/]+$/g, '')
@@ -1146,6 +1184,8 @@ async function boot(): Promise<void> {
   try {
     const paths = await resolveHostPaths(splash, skipRuntimeUpdate)
     assertHostArtifacts(paths)
+    // 启动时确保已启用插件能解析运行时 peer 依赖
+    ensurePluginRuntimeLinks()
     host = createHostSupervisor({
       spawnHost: () => spawnDshWeb({
         ...paths,
