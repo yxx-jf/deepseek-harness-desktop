@@ -243,32 +243,44 @@ function wireDesktopBridge(): void {
     try {
       const pkgPath = join(bundlePath, 'package.json')
       if (!existsSync(pkgPath)) return { ok: false, error: '该目录不是有效的插件包（缺少 package.json）' }
-      // 确保 ~/.dsh/node_modules/@deepseek-ai 有运行时 peer 依赖链接
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; main?: unknown; scripts?: { build?: unknown } }
+      const bundleName = typeof pkg.name === 'string' ? pkg.name : ''
+
+      // 1) 确保运行时 peer 依赖链接（~/.dsh/node_modules/@deepseek-ai）
       ensurePluginRuntimeLinks()
-      const result = await runDshPlugin(['add', bundlePath])
-      if (!result.ok) return { ok: false, error: result.message }
-      // Read the bundle name from package.json.
-      let bundleName = ''
-      let pkg: { name?: unknown; main?: unknown; scripts?: { build?: unknown } } | undefined = undefined
-      try {
-        pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: unknown; main?: unknown; scripts?: { build?: unknown } }
-        bundleName = typeof pkg.name === 'string' ? pkg.name : ''
-      } catch { /* ignore */ }
-      // 如果插件的主入口文件不存在，尝试构建
-      const mainEntry = pkg && typeof pkg.main === 'string' ? pkg.main : 'lib/index.js'
+
+      // 2) 将插件注册到 profile
+      const addResult = await runDshPlugin(['add', bundlePath])
+      if (!addResult.ok) return { ok: false, error: `注册失败：${addResult.message}` }
+
+      // 3) 检查并构建（如果主入口文件缺失）
+      const mainEntry = typeof pkg.main === 'string' && pkg.main !== '' ? pkg.main : 'lib/index.js'
+      const hasBuild = !!(pkg.scripts && typeof pkg.scripts.build === 'string')
       if (!existsSync(join(bundlePath, mainEntry))) {
-        console.log(`desktop plugin build: ${bundleName} — main entry "${mainEntry}" missing, building…`)
-        // 先装依赖（用 pnpm 才能解析 workspace 内的 @deepseek-ai 包）
-        await runCommand('pnpm', ['install', '--ignore-scripts'], { cwd: bundlePath }).catch(() => {})
-        // 如果有 build 脚本则执行
-        if (pkg && pkg.scripts && typeof pkg.scripts.build === 'string') {
+        console.log(`desktop plugin build: ${bundleName} — main "${mainEntry}" missing, installing deps…`)
+        const installResult = await runCommand('pnpm', ['install', '--ignore-scripts'], { cwd: bundlePath })
+        if (installResult.code !== 0) {
+          return { ok: false, error: `安装依赖失败：${installResult.stderr.slice(0, 300)}` }
+        }
+        if (hasBuild) {
           console.log(`desktop plugin build: running "pnpm run build" for ${bundleName}…`)
-          await runCommand('pnpm', ['run', 'build'], { cwd: bundlePath }).catch(() => {})
+          const buildResult = await runCommand('pnpm', ['run', 'build'], { cwd: bundlePath })
+          if (buildResult.code !== 0) {
+            return { ok: false, error: `构建失败：${buildResult.stderr.slice(0, 300)}` }
+          }
         }
       }
-      // 确保插件的所有依赖在 profile 中已解析（如 @deepseek-ai/dsh-session 等 workspace 包）
-      console.log(`desktop plugin: running pnpm install in profile to resolve ${bundleName} dependencies…`)
+
+      // 4) 验证主入口文件现在存在
+      if (!existsSync(join(bundlePath, mainEntry))) {
+        const hint = hasBuild ? '已执行构建脚本但未生成入口文件' : '该插件没有 build 脚本且缺少预构建产物'
+        return { ok: false, error: `${hint}：${mainEntry}` }
+      }
+
+      // 5) 在 profile 中安装所有依赖（解析 peer deps 等）
       await runCommand('pnpm', ['install', '--no-frozen-lockfile'], { cwd: WEB_PROFILE_DIR }).catch(() => {})
+
+      // 6) 保存订阅记录
       const subs = readSubscriptions()
       if (subs[repoUrl] !== undefined) {
         subs[repoUrl].enabledBundle = bundleName
