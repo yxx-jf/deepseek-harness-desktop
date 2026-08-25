@@ -769,7 +769,7 @@ async function runDshPlugin(pnpmArgs: string[]): Promise<{ ok: boolean; message:
   return { ok: true, message: output }
 }
 
-/** Directory holding the runtime's shared `@deepseek-ai/*` packages (used as plugin peer deps). */
+/** Dir holding the runtime's shared `@deepseek-ai/*` packages (used as plugin peer deps). */
 function runtimeDeepSeekAiScope(): string {
   const candidates = app.isPackaged
     ? [join(process.resourcesPath, 'host/node_modules/@deepseek-ai')]
@@ -810,6 +810,49 @@ function ensurePluginRuntimeLinks(): void {
     if (created > 0) console.log(`desktop plugin runtime link: linked ${created} @deepseek-ai package(s) into ${target}`)
   } catch (error) {
     console.warn(`desktop plugin runtime link: setup failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * Rebuild subscribed plugins whose main entry file is missing (e.g. they were
+ * enabled before the auto-build step existed, so `lib/index.js` was never
+ * emitted). Reads the profile's `link:` dependencies to locate each plugin
+ * clone and runs its install + build scripts. Best-effort; failures are logged
+ * but never block startup.
+ */
+async function rebuildMissingPluginEntries(): Promise<void> {
+  try {
+    const pkgPath = join(WEB_PROFILE_DIR, 'package.json')
+    if (!existsSync(pkgPath)) return
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { dependencies?: Record<string, string> }
+    const deps = pkg.dependencies ?? {}
+    for (const [name, spec] of Object.entries(deps)) {
+      // 内置 @deepseek-ai 包跳过；只处理 link: 到本地插件的依赖
+      if (name.startsWith('@deepseek-ai/')) continue
+      const linkSpec = /^link:(.+)/i.exec(spec.trim())
+      if (!linkSpec) continue
+      const pluginDir = linkSpec[1].replace(/[\/\\]+$/g, '')
+      const pluginPkgPath = join(pluginDir, 'package.json')
+      if (!existsSync(pluginPkgPath)) continue
+      let mainEntry = 'lib/index.js'
+      let hasBuild = false
+      try {
+        const pp = JSON.parse(readFileSync(pluginPkgPath, 'utf8')) as { main?: unknown; scripts?: { build?: unknown } }
+        if (typeof pp.main === 'string' && pp.main !== '') mainEntry = pp.main
+        hasBuild = !!pp.scripts && typeof pp.scripts.build === 'string'
+      } catch { /* ignore */ }
+      if (existsSync(join(pluginDir, mainEntry))) continue // 主入口已存在，跳过
+
+      console.log(`desktop plugin rebuild: ${name} — main "${mainEntry}" missing, building…`)
+      await runCommand('pnpm', ['install', '--ignore-scripts'], { cwd: pluginDir }).catch(() => {})
+      if (hasBuild) {
+        await runCommand('pnpm', ['run', 'build'], { cwd: pluginDir }).catch((error: unknown) => {
+          console.warn(`desktop plugin rebuild: ${name} build failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      }
+    }
+  } catch (error) {
+    console.warn(`desktop plugin rebuild: scan failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -1186,6 +1229,8 @@ async function boot(): Promise<void> {
     assertHostArtifacts(paths)
     // 启动时确保已启用插件能解析运行时 peer 依赖
     ensurePluginRuntimeLinks()
+    // 重建主入口文件缺失的插件（如之前启用但未构建的）
+    await rebuildMissingPluginEntries()
     host = createHostSupervisor({
       spawnHost: () => spawnDshWeb({
         ...paths,
