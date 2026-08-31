@@ -32,14 +32,27 @@ function parseReadinessLine(line: string): string | undefined {
   if (url.protocol !== 'http:'
     || (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost')
     || url.pathname !== '/'
-    || url.search !== ''
+    || !isReadinessQuery(url.search)
     || url.hash !== ''
     || !Number.isInteger(port)
     || port < 1
     || port > 65_535) {
     throw new Error(`desktop Host readiness URL must be loopback HTTP with an explicit port: ${token}`)
   }
-  return url.origin
+  // Newer `dsh web` hosts guard the page with a per-boot auth token in the
+  // query (`?token=...`) and 401 without it, so the full URL must carry
+  // through to the window load.
+  return url.origin + url.search
+}
+
+/**
+ * Whether the readiness URL's query is acceptable: empty (older hosts) or
+ * exactly `?token=<non-empty>` (alpha.1+ host auth). Anything else — a
+ * different query parameter, or a token the host did not emit — is rejected.
+ */
+function isReadinessQuery(search: string): boolean {
+  if (search === '') return true
+  return search.startsWith('?token=') && search.length > '?token='.length
 }
 
 /**

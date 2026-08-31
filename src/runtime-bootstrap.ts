@@ -18,6 +18,18 @@ import { finished } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import { Unzip, UnzipInflate, type UnzipFile } from 'fflate'
 
+/** One ordered byte slice of the runtime archive, downloaded in parallel. */
+export interface RuntimePart {
+  /** Attachment file name (also the last URL path segment). */
+  readonly name: string
+  /** Absolute http(s) URL of this part. */
+  readonly url: string
+  /** Lowercase hex SHA-256 of this part's bytes. */
+  readonly sha256: string
+  /** Byte length of this part. */
+  readonly size: number
+}
+
 /** Runtime manifest served beside the downloadable runtime archive. */
 export interface RuntimeManifest {
   /** Content-addressed version of the archive (app version plus stage hash). */
@@ -28,6 +40,13 @@ export interface RuntimeManifest {
   readonly sha256: string
   /** Compressed size in bytes when the server reports one. */
   readonly size?: number
+  /**
+   * Optional ordered slices of the archive. When present, the shell downloads
+   * every part in parallel (Gitee caps each connection at ~2 MB/s, so parallel
+   * connections multiply throughput) and concatenates them before verifying
+   * the whole-archive SHA-256. Absent for hosts that only offer the full zip.
+   */
+  readonly parts?: readonly RuntimePart[]
 }
 
 /** One progress observation from the bootstrap flow. */
@@ -71,6 +90,12 @@ export interface RuntimeBootstrapOptions {
   /** Extra attempts per candidate URL after the first failure (default 1). */
   readonly downloadRetries?: number
   /**
+   * Number of parallel connections used when the manifest publishes parts
+   * (default 8). Gitee throttles each connection, so more connections speed up
+   * the download up to the host's connection cap.
+   */
+  readonly downloadConcurrency?: number
+  /**
    * Prefixes prepended to the archive URL for fallback attempts, tried after
    * the primary URL is exhausted. Mirrors must serve the identical bytes;
    * the manifest SHA-256 still gates every attempt.
@@ -105,6 +130,21 @@ export function validateManifest(manifest: RuntimeManifest): void {
   }
   if (typeof manifest.sha256 !== 'string' || !SHA256_PATTERN.test(manifest.sha256)) {
     throw new Error('runtime manifest has no valid sha256')
+  }
+  if (manifest.parts !== undefined) {
+    if (!Array.isArray(manifest.parts) || manifest.parts.length === 0) {
+      throw new Error('runtime manifest has an invalid parts list')
+    }
+    for (const part of manifest.parts) {
+      if (
+        typeof part.name !== 'string' || part.name.length === 0 ||
+        typeof part.url !== 'string' || !/^https?:\/\//u.test(part.url) ||
+        typeof part.sha256 !== 'string' || !SHA256_PATTERN.test(part.sha256) ||
+        typeof part.size !== 'number' || !Number.isFinite(part.size) || part.size <= 0
+      ) {
+        throw new Error('runtime manifest has an invalid part')
+      }
+    }
   }
 }
 
@@ -246,6 +286,70 @@ async function downloadArchive(
   } finally {
     clearInterval(watchdog)
   }
+}
+
+/**
+ * Download every part of a split archive in parallel, verify each part's own
+ * SHA-256, then concatenate them in order and return the combined SHA-256.
+ *
+ * Gitee throttles each connection to roughly 2 MB/s, so pulling N parts over
+ * N connections multiplies throughput nearly linearly (measured ~7.5 MB/s at
+ * 4 ways and ~13.5 MB/s at 8). The caller still verifies the concatenation
+ * against the manifest sha256 before installing.
+ */
+async function downloadPartsInParallel(
+  fetchImpl: typeof fetch,
+  parts: readonly RuntimePart[],
+  downloadDir: string,
+  onBytes: ((received: number, total: number) => void) | undefined,
+  limits: DownloadLimits,
+  concurrency: number,
+): Promise<string> {
+  const total = parts.reduce((sum, part) => sum + part.size, 0)
+  let received = 0
+  let next = 0
+  const partPaths: string[] = []
+
+  const worker = async (): Promise<void> => {
+    while (next < parts.length) {
+      const index = next
+      next += 1
+      const part = parts[index]
+      const path = join(downloadDir, `part-${index}`)
+      partPaths[index] = path
+      // Each part is fetched with its own stall watchdog; onBytes is left off
+      // per-part so the aggregate progress below is the only progress signal.
+      const result = await downloadArchive(fetchImpl, part.url, path, undefined, limits)
+      if (result.sha256 !== part.sha256) {
+        throw new Error(`runtime part ${index} checksum mismatch (expected ${part.sha256}, got ${result.sha256})`)
+      }
+      received += part.size
+      onBytes?.(received, total)
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, parts.length) }, () => worker())
+  await Promise.all(workers)
+
+  // Concatenate parts in order into the single archive file.
+  const archivePath = join(downloadDir, 'runtime.zip')
+  const writer = createWriteStream(archivePath)
+  const hash = createHash('sha256')
+  try {
+    for (let index = 0; index < parts.length; index += 1) {
+      for await (const chunk of createReadStream(partPaths[index])) {
+        const bytes = chunk as Buffer
+        hash.update(bytes)
+        if (!writer.write(bytes)) await new Promise<void>(accept => writer.once('drain', accept))
+      }
+    }
+    writer.end()
+    await finished(writer)
+  } catch (error) {
+    writer.destroy()
+    throw error
+  }
+  return hash.digest('hex')
 }
 
 /**
@@ -404,35 +508,63 @@ export async function ensureRuntime(options: RuntimeBootstrapOptions): Promise<B
     ]
     let downloaded: { path: string; sha256: string } | undefined
     let lastError: unknown
-    for (const candidate of candidates) {
-      for (let attempt = 0; attempt <= retries; attempt += 1) {
-        await rm(archivePath, { force: true }).catch(() => {})
-        report(progressOf('downloading', 0, attempt > 0 ? `attempt ${attempt + 1} of ${candidate}` : undefined))
-        try {
-          const result = await downloadArchive(
-            fetchImpl,
-            candidate,
-            archivePath,
-            (received, total) => { report(progressOf('downloading', percentOf(received, total))) },
-            limits,
-          )
-          if (result.sha256 !== manifest.sha256) {
-            throw new Error(`runtime archive checksum mismatch (expected ${manifest.sha256}, got ${result.sha256})`)
-          }
-          downloaded = result
-          break
-        } catch (error) {
-          lastError = error
+
+    // Parallel path: the manifest optionally lists ordered slices served as
+    // independent attachments. Gitee caps each connection (~2 MB/s), so
+    // downloading every part at once multiplies throughput nearly linearly.
+    // The whole concatenation is still verified against manifest.sha256.
+    if (manifest.parts !== undefined && manifest.parts.length > 1) {
+      report(progressOf('downloading', 0, `parallel ${manifest.parts.length}-way`))
+      try {
+        const combinedSha = await downloadPartsInParallel(
+          fetchImpl,
+          manifest.parts,
+          downloadDir,
+          (received, total) => { report(progressOf('downloading', percentOf(received, total))) },
+          limits,
+          options.downloadConcurrency ?? 8,
+        )
+        if (combinedSha !== manifest.sha256) {
+          throw new Error(`runtime archive checksum mismatch (expected ${manifest.sha256}, got ${combinedSha})`)
         }
+        downloaded = { path: archivePath, sha256: combinedSha }
+      } catch (error) {
+        lastError = error
       }
-      if (downloaded !== undefined) break
     }
+
+    // Fallback: single serial download from the archive URL (or mirrors).
     if (downloaded === undefined) {
-      const reason = lastError instanceof Error ? lastError.message : String(lastError)
-      throw new Error(
-        `runtime archive download failed after ${candidates.length * (retries + 1)} attempt(s): ${reason}`,
-        { cause: lastError },
-      )
+      for (const candidate of candidates) {
+        for (let attempt = 0; attempt <= retries; attempt += 1) {
+          await rm(archivePath, { force: true }).catch(() => {})
+          report(progressOf('downloading', 0, attempt > 0 ? `attempt ${attempt + 1} of ${candidate}` : undefined))
+          try {
+            const result = await downloadArchive(
+              fetchImpl,
+              candidate,
+              archivePath,
+              (received, total) => { report(progressOf('downloading', percentOf(received, total))) },
+              limits,
+            )
+            if (result.sha256 !== manifest.sha256) {
+              throw new Error(`runtime archive checksum mismatch (expected ${manifest.sha256}, got ${result.sha256})`)
+            }
+            downloaded = result
+            break
+          } catch (error) {
+            lastError = error
+          }
+        }
+        if (downloaded !== undefined) break
+      }
+      if (downloaded === undefined) {
+        const reason = lastError instanceof Error ? lastError.message : String(lastError)
+        throw new Error(
+          `runtime archive download failed after ${candidates.length * (retries + 1)} attempt(s): ${reason}`,
+          { cause: lastError },
+        )
+      }
     }
 
     report(progressOf('extracting', 0))

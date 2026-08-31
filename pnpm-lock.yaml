@@ -11,6 +11,9 @@ importers:
 
   .:
     dependencies:
+      dshmarket:
+        specifier: ^1.38.0
+        version: 1.38.0(@deepseek-ai/cordis@4.0.1)
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
@@ -38,6 +41,21 @@ importers:
         version: 6.0.3
 
 packages:
+
+  '@deepseek-ai/cordis@4.0.1':
+    resolution: {integrity: sha512-YBdskTU2Po1kru3GgcUWUbkTsPMA9LkSQDAY8rBkFJeajdgcQad3QPJZE26JyK99Xb6HaASvoXg2DSUTeN/0Nw==}
+    hasBin: true
+    peerDependencies:
+      '@deepseek-ai/cordis-plugin-include': ^1.0.6
+      '@deepseek-ai/cordis-plugin-loader': ^1.0.2
+    peerDependenciesMeta:
+      '@deepseek-ai/cordis-plugin-include':
+        optional: true
+      '@deepseek-ai/cordis-plugin-loader':
+        optional: true
+
+  '@deepseek-ai/cosmokit@1.8.2':
+    resolution: {integrity: sha512-muBOKtSrUKU5m/xpq8ZXWL6hQ/jgd4PhU2PqH97bcxIiLEJfNwZOGQEx4t/aS/GgxRAR+ra9pMHPMtTHU4sqqA==}
 
   '@electron-internal/extract-zip@1.0.5':
     resolution: {integrity: sha512-+bqFCP98pLI0Tt0XQo1TmlXtwjWchISndDOxCkEcIuUgXWpBnLyRI+2DU+mesvnMMX6L1XDqYNA0lXNDHd/yiA==}
@@ -375,6 +393,9 @@ packages:
   '@sindresorhus/is@4.0.0':
     resolution: {integrity: sha512-FyD2meJpDPjyNQejSjvnhpgI/azsQkA4lGbuu5BQZfjvJ9cbRZXzeWL2HceCekW4lixO9JPesIIQkSoLjeJHNQ==}
     engines: {node: '>=10'}
+
+  '@standard-schema/spec@1.1.0':
+    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
   '@szmarczak/http-timer@4.0.6':
     resolution: {integrity: sha512-4BAffykYOgO+5nzBWYwE3W90sBgLJoUPRWWcL8wlyiM8IB8ipJz3UMJ9KXQd1RKQXpKp8Tutn80HZtWsu2u76w==}
@@ -772,6 +793,18 @@ packages:
   dotenv@16.4.5:
     resolution: {integrity: sha512-ZmdL2rui+eB2YwhsWzjInR8LldtZHGDoQ1ugH85ppHKwpUHL7j7rN0Ti9NCnGiQbhaZ11FpR+7ao1dNsmduNUg==}
     engines: {node: '>=12'}
+
+  dshmarket@1.38.0:
+    resolution: {integrity: sha512-2qr1dbmJ7uCzyZXSoYGat9Kwrx2aZZNxJyXiU2wD2/4lI0wp6DwObjBCbD4aD186RK5EH1BwV4CKHxquhI2zDg==}
+    peerDependencies:
+      '@deepseek-ai/cordis': ^4.0.1
+      '@deepseek-ai/dsh-settings': ^0.1.0-rc.7 || ^0.1.1-rc.2
+      '@deepseek-ai/schemastery': ^3.18.1
+    peerDependenciesMeta:
+      '@deepseek-ai/dsh-settings':
+        optional: true
+      '@deepseek-ai/schemastery':
+        optional: true
 
   dts-resolver@3.0.0:
     resolution: {integrity: sha512-1T1f+z+4tl9XD+m+0HBgWoL/nm0bOIffyWaUuUSBlFg/86IWvfx+wjNaO/ybU0AJzG9/Mi5hBUgGV6zCmWEN7Q==}
@@ -1627,6 +1660,13 @@ packages:
 
 snapshots:
 
+  '@deepseek-ai/cordis@4.0.1':
+    dependencies:
+      '@deepseek-ai/cosmokit': 1.8.2
+      '@standard-schema/spec': 1.1.0
+
+  '@deepseek-ai/cosmokit@1.8.2': {}
+
   '@electron-internal/extract-zip@1.0.5': {}
 
   '@electron/asar@3.4.1':
@@ -1893,6 +1933,8 @@ snapshots:
   '@rolldown/pluginutils@1.0.1': {}
 
   '@sindresorhus/is@4.0.0': {}
+
+  '@standard-schema/spec@1.1.0': {}
 
   '@szmarczak/http-timer@4.0.6':
     dependencies:
@@ -2277,6 +2319,12 @@ snapshots:
       dotenv: 16.4.5
 
   dotenv@16.4.5: {}
+
+  dshmarket@1.38.0(@deepseek-ai/cordis@4.0.1):
+    dependencies:
+      '@deepseek-ai/cordis': 4.0.1
+      js-yaml: 4.3.1
+      undici: 7.29.0
 
   dts-resolver@3.0.0: {}
 
@@ -3094,8 +3142,7 @@ snapshots:
 
   undici@6.28.0: {}
 
-  undici@7.29.0:
-    optional: true
+  undici@7.29.0: {}
 
   universalify@0.1.2: {}
 

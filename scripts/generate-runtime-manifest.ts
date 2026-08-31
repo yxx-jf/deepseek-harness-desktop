@@ -35,6 +35,10 @@ async function main(): Promise<void> {
   names.sort()
   const dependencies: Record<string, string> = {}
   for (const name of names) dependencies[name] = 'workspace:^'
+  // The official plugin market (dshmarket) is deliberately NOT listed here:
+  // it is an external npm package that lives outside the upstream workspace
+  // lockfile, so pnpm deploy would not install it and restoreLegacyHoists
+  // would fail. stage-runtime.ts copies it into the runtime closure directly.
   const manifest = {
     name: '@deepseek-ai/dsh-desktop-runtime',
     description: 'Dependency-only deploy root for the packaged desktop Host',

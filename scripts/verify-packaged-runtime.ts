@@ -1,6 +1,6 @@
 /** Reject a packaged desktop shell that has neither a bundled nor a configured runtime. */
 
-import { readFileSync, writeFileSync, cpSync, existsSync } from 'node:fs'
+import { readFileSync, cpSync, existsSync } from 'node:fs'
 import { access } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,6 +29,20 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
   const hostDir = join(resources, 'host')
   const bundledHost = join(hostDir, 'node_modules')
 
+  // Thin-shell mode: a runtime-config.json shipped into desktop-resources
+  // points at a remote runtime manifest (published to Gitee/GitHub). Skip
+  // bundling runtime-host entirely — the runtime ZIP is created by
+  // publish-runtime.ts and already carries every desktop patch, so a thin
+  // installer needs no embedded Host and no afterPack patching.
+  const remoteConfigPath = join(resources, 'desktop-resources', 'runtime-config.json')
+  if (existsSync(remoteConfigPath)) {
+    const remoteConfig = JSON.parse(readFileSync(remoteConfigPath, 'utf8')) as { manifestUrl?: unknown }
+    if (typeof remoteConfig.manifestUrl === 'string' && remoteConfig.manifestUrl.length > 0) {
+      console.log(`afterPack: thin shell — runtime served from ${remoteConfig.manifestUrl}`)
+      return
+    }
+  }
+
   // Copy the staged runtime into the packaged app when it isn't bundled yet.
   // electron-builder's extraResources filters out node_modules, so we do the
   // copy here in the afterPack hook where we control the exact files.
@@ -54,62 +68,12 @@ export async function afterPack(context: AfterPackContext): Promise<void> {
     return
   }
 
-  // Patch the native picker first (worker IPC stdout fallback for Electron's node mode).
-  const { patchNativePicker } = await import('./patch-native-picker.mjs')
-  patchNativePicker(RUNTIME_HOST_DIR)
-
-  // Patch the UI brand label from "DSH Local Build" / any prior residue to
-  // the official product name "DeepSeek Harness".
-  for (const file of ['dsh-client-ui-sidebar/lib/client.js', 'dsh-client-ui-renderer/lib/client.js']) {
-    const p = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', file)
-    if (existsSync(p)) {
-      const text = readFileSync(p, 'utf8')
-      // Handle both the pristine fallback and a previously applied lower-case
-      // variant so the label always converges on the correct casing.
-      let patched = text.replaceAll('DSH Local Build', 'DeepSeek Harness')
-      patched = patched.replaceAll('deepseek harness', 'DeepSeek Harness')
-      if (patched !== text) {
-        writeFileSync(p, patched)
-        console.log(`afterPack: patched brand label in ${file}`)
-      }
-    }
-  }
-
-  // Patch the native path opener: the Host (ELECTRON_RUN_AS_NODE child) cannot
-  // spawn visible GUI windows because its children are dispatched to a hidden
-  // window station.  Instead, write the document path to a temp file that the
-  // Electron main process polls and opens via shell.openPath().
-  const openerPath = join(RUNTIME_HOST_DIR, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'types', 'native-path-opener.js')
-  if (existsSync(openerPath)) {
-    let text = readFileSync(openerPath, 'utf8')
-    const marker = 'dsh-open-doc.txt'
-    if (!text.includes(marker)) {
-      // All known forms (oldest to newest):
-      const forms: string[] = [
-        'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'rundll32.exe\', [\n            \'shell32.dll,OpenAs_RunDLL\',\n            path,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}',
-        'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        const { exec } = await import(\'node:child_process\');\n        exec(\'start "" "\' + path + \'"\', { windowsHide: true });\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}',
-        'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        const { spawn } = await import(\'node:child_process\');\n        const child = spawn(\'notepad.exe\', [path], { detached: true, stdio: \'ignore\' });\n        child.unref();\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}',
-        'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'powershell.exe\', [\n            \'-NoProfile\',\n            \'-Command\',\n            \`Start-Process -FilePath notepad.exe -ArgumentList \${powershellLiteral(path)}\`,\n        ], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}',
-        'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        await run(\'notepad.exe\', [path], signal);\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}',
-        'async function openWindowsPath(path, signal, run) {\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}',
-      ]
-      const finalFn = 'async function openWindowsPath(path, signal, run) {\n    const ext = path.split(\'.\').pop().toLowerCase();\n    if (ext === \'yaml\' || ext === \'yml\' || ext === \'json\') {\n        // Write the path to a temp file that the Electron main process polls.\n        // The Host (ELECTRON_RUN_AS_NODE child) cannot spawn visible GUI\n        // windows because its children are dispatched to a hidden window\n        // station.  The main process calls shell.openPath() which always\n        // appears on the interactive desktop.\n        const { writeFileSync } = await import(\'node:fs\');\n        const { join } = await import(\'node:path\');\n        const tmp = process.env.TEMP || process.env.TMP || \'/tmp\';\n        writeFileSync(join(tmp, \'dsh-open-doc.txt\'), path, \'utf8\');\n        return;\n    }\n    await run(\'powershell.exe\', [\n        \'-NoProfile\',\n        \'-Command\',\n        \`Invoke-Item -LiteralPath \${powershellLiteral(path)}\`,\n    ], signal);\n}'
-      let patched = false
-      for (const oldFn of forms) {
-        if (text.includes(oldFn)) {
-          text = text.replace(oldFn, finalFn)
-          patched = true
-          break
-        }
-      }
-      if (patched) {
-        writeFileSync(openerPath, text)
-        console.log('afterPack: patched native-path-opener for text file types')
-      } else {
-        console.log('afterPack: native-path-opener openWindowsPath signature mismatch (skipped)')
-      }
-    }
-  }
+  // Apply every desktop-specific runtime patch (native picker with forced
+  // browse backend, brand label + locale, native path opener) so the bundled
+  // Host stays identical to the remote runtime ZIP published by
+  // publish-runtime.ts — thin-shell installs must not run an unpatched Host.
+  const { applyRuntimePatches } = await import('./runtime-patches.mjs')
+  await applyRuntimePatches(RUNTIME_HOST_DIR)
 
   console.log(`afterPack: copying runtime-host to ${hostDir}`)
   cpSync(RUNTIME_HOST_DIR, hostDir, { recursive: true, dereference: true })

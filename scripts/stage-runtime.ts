@@ -32,7 +32,7 @@ const modulesYaml = join(repositoryRoot, 'node_modules/.modules.yaml')
 const fingerprintFile = join(staging, '.stage-fingerprint.json')
 
 /** Bump when the staging procedure changes so stale trees are rebuilt. */
-const STAGE_CACHE_VERSION = 3
+const STAGE_CACHE_VERSION = 5
 
 /** Every workspace package.json glob the runtime manifest derives its closure from. */
 const workspaceManifestGlobs = [
@@ -58,7 +58,10 @@ function quoteArg(argument: string): string {
 
 async function run(command: string, args: readonly string[]): Promise<void> {
   await new Promise<void>((accept, reject) => {
-    const env = { ...process.env, CI: 'true' }
+    // CI=true keeps pnpm non-interactive; confirm-modules-purge=false stops the
+    // "will be removed and reinstalled from scratch. Proceed? (Y/n)" prompt
+    // when the hoisted deploy rewrote the workspace node_modules metadata.
+    const env = { ...process.env, CI: 'true', npm_config_confirm_modules_purge: 'false' }
     const cwd = repositoryRoot
     // A .cmd shim cannot be spawned directly on Windows; drive the whole
     // quoted command line through the shell (the npm/cross-spawn pattern).
@@ -210,7 +213,7 @@ async function deploy(): Promise<void> {
   }
   try {
     await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', [
-      '--config.verify-deps-before-run=false', '--filter', staged?.filter ?? deployPackage, 'deploy', '--legacy', '--prod',
+      '--config.verify-deps-before-run=false', '--config.confirm-modules-purge=false', '--filter', staged?.filter ?? deployPackage, 'deploy', '--legacy', '--prod',
       '--config.node-linker=hoisted', '--config.auto-install-peers=false', '--config.link-workspace-packages=true', staging,
     ])
   } finally {
@@ -224,7 +227,7 @@ async function deploy(): Promise<void> {
     // cannot resolve package-local devDependencies. Re-link it after restoring
     // the metadata; best-effort so a deploy failure is not masked.
     try {
-      await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['install', '--no-frozen-lockfile'])
+      await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['install', '--no-frozen-lockfile', '--config.confirm-modules-purge=false'])
     } catch (error) {
       console.warn(`desktop runtime staging: workspace re-link failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -345,6 +348,86 @@ async function pruneRuntime(): Promise<{ files: number; bytes: number }> {
   return { files, bytes }
 }
 
+/**
+ * Copy the official plugin market package into the staged runtime closure.
+ *
+ * dshmarket is an external npm package outside the upstream workspace
+ * lockfile, so `pnpm deploy` cannot install it. Its peers
+ * (`@deepseek-ai/cordis`, `@deepseek-ai/dsh-settings`, `js-yaml`, `undici`, …)
+ * are already part of the flat hoisted closure, so copying the package next
+ * to them lets the Host resolve it exactly as it resolves every other bundle.
+ * The desktop build keeps the package as its own dependency so the copy
+ * always has a source. @returns nothing; throws when the package is missing.
+ */
+async function stageMarketBundle(): Promise<void> {
+  const source = join(desktopRoot, 'node_modules', 'dshmarket')
+  if (!existsSync(source)) {
+    throw new Error('desktop market dependency is missing; run: pnpm add dshmarket')
+  }
+  const destination = join(staging, 'node_modules', 'dshmarket')
+  await rm(destination, { recursive: true, force: true })
+  await mkdir(dirname(destination), { recursive: true })
+  // Copy the resolved package (dereference the pnpm symlink) without its own
+  // node_modules so the flat runtime closure stays the single source of peers.
+  await cp(source, destination, {
+    recursive: true,
+    dereference: true,
+    filter: path => path !== join(source, 'node_modules') && !path.startsWith(join(source, 'node_modules') + sep),
+  })
+  // The deepest generated declaration names exceed MAX_PATH once installed;
+  // drop declaration and source-map files from the copied package too.
+  const pending: string[] = [destination]
+  while (pending.length > 0) {
+    const dir = pending.pop() as string
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) pending.push(path)
+      else if (entry.name.endsWith('.d.ts') || entry.name.endsWith('.map')) await rm(path, { force: true })
+    }
+  }
+  console.log('desktop runtime market: copied dshmarket into the staged closure')
+}
+
+/**
+ * Bundle the standalone pnpm executable into the staged runtime.
+ *
+ * The plugin market's install chain needs `pnpm` on PATH: its `probePnpm()`
+ * runs `pnpm --version`, and `dsh plugin --profile web add` forwards to
+ * `pnpm` internally. A packaged desktop has no system pnpm (and its bundled
+ * Node carries no npm/corepack to provision one), so the one-click install
+ * path would stay disabled. Bundling pnpm's official single-file JavaScript
+ * bundle (`dist/pnpm.mjs` from `@pnpm/exe`) and a small Windows command shim,
+ * then having the desktop prepend its directory to the Host's PATH, closes
+ * the gap with only about 14 MB added to the installer. The shim invokes the
+ * Electron executable supplied by `DSH_DESKTOP_NODE_EXECUTABLE`.
+ *
+ * The desktop build keeps @pnpm/exe as its own dependency so the copy always
+ * has a source. @returns nothing; throws when the package is missing.
+ */
+async function stagePnpm(): Promise<void> {
+  const source = join(desktopRoot, 'vendor', 'pnpm', 'dist')
+  if (!existsSync(join(source, 'pnpm.mjs'))) {
+    throw new Error('desktop pnpm vendor is missing; re-run pnpm add @pnpm/exe and copy vendor/pnpm/dist')
+  }
+  const binDir = join(staging, 'bin', 'pnpm')
+  await rm(binDir, { recursive: true, force: true })
+  await mkdir(binDir, { recursive: true })
+  // pnpm.mjs is a self-contained ES module bundle; worker.js and templates
+  // are loaded relative to dist/. Copy the full vendor tree.
+  await cp(source, join(binDir, 'dist'), {
+    recursive: true,
+    dereference: true,
+  })
+  await writeFile(join(binDir, 'pnpm.cmd'), '@echo off\r\n"%DSH_DESKTOP_NODE_EXECUTABLE%" --expose-internals "%~dp0dist\\pnpm.mjs" %*\r\n', 'utf8')
+  console.log('desktop runtime pnpm: bundled pnpm.mjs and Windows shim into the staged closure')
+}
+
 async function main(): Promise<void> {
   await run(process.execPath, ['--import', 'tsx', join(desktopRoot, 'scripts/generate-runtime-manifest.ts')])
   await run(process.execPath, [
@@ -371,6 +454,8 @@ async function main(): Promise<void> {
   } else {
     console.log('desktop runtime staging: cache hit, reusing staged runtime-host')
   }
+  await stageMarketBundle()
+  await stagePnpm()
   await verifyProfilePlugins()
   if (!existsSync(entry)) throw new Error(`desktop Host entry missing after staging: ${entry}`)
   if (!existsSync(frontend)) throw new Error(`desktop Web frontend missing after staging: ${frontend}`)

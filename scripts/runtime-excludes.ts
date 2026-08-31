@@ -18,6 +18,10 @@ export const RUNTIME_EXCLUDED_PACKAGES = new Set([
   '@deepseek-ai/dsh-sdk-jsonrpc-demo',
   '@deepseek-ai/dsh-sdk-jsonrpc-server',
   '@deepseek-ai/dsh-sdk-protocol',
+  // Standalone SDK/ACP profile app bundles (the desktop ships the web profile only).
+  '@deepseek-ai/dsh-sdk-app',
+  '@deepseek-ai/dsh-sdk-minimal',
+  '@deepseek-ai/dsh-acp-app',
   // E2B POC sandbox.
   '@deepseek-ai/dsh-e2b',
   '@deepseek-ai/dsh-fs-e2b',

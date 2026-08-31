@@ -117,12 +117,127 @@ export function patchNativePicker(runtimeRoot = RUNTIME_ROOT) {
   return null
 }
 
+/**
+ * Patch the picker worker's main execution to route through a temp-file bridge
+ * when the packaged Host sets `DSH_DESKTOP_BRIDGE_PICKER=1`.
+ *
+ * WHY: the worker drives the Win32 folder dialog through koffi (FFI). Under
+ * Electron's `ELECTRON_RUN_AS_NODE` the embedded Node's NAPI ABI mismatches the
+ * prebuilt koffi native module, so `koffi.view()`/`decode` abort the process
+ * (FATAL, code 134) after the dialog closes — the worker never reports a
+ * result. Instead of fixing the ABI, the packaged Host hands the dialog to the
+ * Electron main process (`dialog.showOpenDialog`, the real native picker) via
+ * a request/result file pair: the worker writes `dsh-pick-dir.txt` with the
+ * dialog title, polls `dsh-pick-dir-result.txt`, and reports the chosen path.
+ * Development keeps the koffi path (real node, native dialog, working IPC).
+ */
+export function patchWorkerDesktopBridge(runtimeRoot = RUNTIME_ROOT) {
+  const nativeLib = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-host-directory-picker-native', 'lib')
+  const workerPath = join(nativeLib, 'worker.cjs')
+  if (!existsSync(workerPath)) {
+    console.warn(`[patch-native-picker] no worker at ${workerPath}; skipping bridge`)
+    return
+  }
+  console.log(`[patch-native-picker] adding desktop bridge branch in ${workerPath}`)
+  if (hasMarker(workerPath, 'DSH_DESKTOP_BRIDGE_PICKER')) {
+    console.log('  = worker desktop bridge already patched')
+    return
+  }
+  // Anchor on the worker's main execution preamble. It must stay unique and
+  // match the compiled worker exactly (tab-indented, as shipped).
+  const anchor = [
+    '(async () => {',
+    '\ttry {',
+    '\t\tpost({',
+    '\t\t\tkind: "done",',
+    '\t\t\tpath: runFolderDialog(await loadWin32DialogBindings(), title, (threadId) => {',
+  ].join('\n')
+  const bridge = [
+    '(async () => {',
+    '\t// Desktop bridge: under ELECTRON_RUN_AS_NODE the koffi FFI below crashes',
+    '\t// (NAPI ABI mismatch), so a packaged Host sets DSH_DESKTOP_BRIDGE_PICKER=1',
+    '\t// and this worker asks the Electron main process to show the real native',
+    '\t// folder dialog via dialog.showOpenDialog (temp-file request/result).',
+    '\tif (process.env.DSH_DESKTOP_BRIDGE_PICKER === "1") {',
+    '\t\tconst { writeFileSync, readFileSync, existsSync, rmSync } = await import("node:fs");',
+    '\t\tconst { join } = await import("node:path");',
+    '\t\tconst tmp = process.env.TEMP || process.env.TMP || "/tmp";',
+    '\t\tconst reqFile = join(tmp, "dsh-pick-dir.txt");',
+    '\t\tconst resFile = join(tmp, "dsh-pick-dir-result.txt");',
+    '\t\ttry { rmSync(resFile, { force: true }); } catch {}',
+    '\t\twriteFileSync(reqFile, title, "utf8");',
+    '\t\tconst deadline = Date.now() + 120000;',
+    '\t\tlet path = null;',
+    '\t\twhile (Date.now() < deadline) {',
+    '\t\t\ttry {',
+    '\t\t\t\tif (existsSync(resFile)) {',
+    '\t\t\t\t\tconst text = readFileSync(resFile, "utf8").trim();',
+    '\t\t\t\t\tpath = (text === "" || text === "__CANCELLED__") ? null : text;',
+    '\t\t\t\t\tbreak;',
+    '\t\t\t\t}',
+    '\t\t\t} catch {}',
+    '\t\t\tawait new Promise((resolve) => setTimeout(resolve, 100));',
+    '\t\t}',
+    '\t\ttry { rmSync(reqFile, { force: true }); } catch {}',
+    '\t\ttry { rmSync(resFile, { force: true }); } catch {}',
+    '\t\tpost({ kind: "done", path });',
+    '\t\treturn;',
+    '\t}',
+    '\ttry {',
+    '\t\tpost({',
+    '\t\t\tkind: "done",',
+    '\t\t\tpath: runFolderDialog(await loadWin32DialogBindings(), title, (threadId) => {',
+  ].join('\n')
+  replace(workerPath, anchor, bridge, 'worker: desktop bridge branch')
+  console.log(`[patch-native-picker] ${applied} replacement(s) applied`)
+  return null
+}
+
+/**
+ * Force the adaptive directory-picker to the pure-Node `browse` backend in the
+ * packaged desktop.
+ *
+ * WHY: the native Win32 backend drives its dialog from a spawned child process
+ * (`process.execPath` = Electron under `ELECTRON_RUN_AS_NODE`), and spawning
+ * Electron children is unreliable in the packaged environment — the worker
+ * exits before reporting a result. The `browse` backend is a plain Node
+ * one-level directory listing with no child process and no native dialog, so
+ * pinning every packaged boot to `browse` sidesteps the fragile spawn. The
+ * Host must also receive `DSH_FORCE_DIRECTORY_PICKER=browse` in its env
+ * (src/main.ts), and the desktop shell applies this patch idempotently at
+ * packaging time (verify-packaged-runtime.ts).
+ *
+ * These edits target the COMPILED lib/ file (what the runtime actually loads),
+ * so they live in the desktop repo and are applied idempotently on every build.
+ */
+export function patchAutoPickerForceBrowse(runtimeRoot = RUNTIME_ROOT) {
+  const indexPath = join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh-host-directory-picker-auto', 'lib', 'index.js')
+  if (!existsSync(indexPath)) {
+    console.warn(`[patch-auto-picker] runtime has no auto picker at ${indexPath}; skipping`)
+    return
+  }
+  console.log(`[patch-auto-picker] forcing browse backend in ${runtimeRoot}`)
+  if (!hasMarker(indexPath, 'DSH_FORCE_DIRECTORY_PICKER')) {
+    replace(
+      indexPath,
+      'function resolveDirectoryPickerBackend(facts) {\n\tif (facts.bindHost !== "127.0.0.1") return "browse";',
+      'function resolveDirectoryPickerBackend(facts) {\n\tif (process.env.DSH_FORCE_DIRECTORY_PICKER === "browse") return "browse";\n\tif (facts.bindHost !== "127.0.0.1") return "browse";',
+      'auto-picker: force browse via DSH_FORCE_DIRECTORY_PICKER',
+    )
+  } else {
+    console.log('  = auto-picker already patched')
+  }
+  return null
+}
+
 // Allow import as a module (from verify-packaged-runtime / release scripts) and
 // direct CLI execution.
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
   try {
     patchNativePicker()
+    patchWorkerDesktopBridge()
+    patchAutoPickerForceBrowse()
   } catch (error) {
     console.error(`[patch-native-picker] FAILED: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)

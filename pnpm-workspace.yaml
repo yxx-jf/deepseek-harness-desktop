@@ -11,6 +11,11 @@ overrides:
 
 # pnpm 10+ blocks any dependency shipping an install/build script until it is
 # explicitly reviewed here (strictDepBuilds defaults to true).
+# `onlyBuiltDependencies` is the pnpm 10 spelling; `allowBuilds` is the pnpm
+# 11.7+ spelling. Both are declared so installs work with either major.
+onlyBuiltDependencies:
+  - electron
+  - esbuild
 allowBuilds:
   # Electron downloads its runtime in postinstall; the desktop shell needs it.
   electron: true

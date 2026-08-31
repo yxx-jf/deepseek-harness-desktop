@@ -30,9 +30,14 @@ async function main() {
     console.log('  ✓ Upstream cloned successfully')
   } else {
     // Update existing clone
+    // NOTE: This is a --depth 1 shallow clone with no shared history, so
+    // `git merge origin/master` fails with "refusing to merge unrelated
+    // histories". Reset instead (matching prepare-upstream.mjs). The
+    // upstream dir is a read-only mirror of the official repo, so any local
+    // modifications here are intentionally discarded.
     console.log('  Fetching latest upstream...')
     run('git fetch origin --depth 1', { cwd: UPSTREAM_DIR })
-    run('git merge origin/master', { cwd: UPSTREAM_DIR })
+    run('git reset --hard origin/master', { cwd: UPSTREAM_DIR })
     console.log('  ✓ Upstream updated successfully')
   }
 

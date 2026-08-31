@@ -1,7 +1,7 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -332,27 +332,34 @@ function wireDesktopBridge(): void {
  * generic update feed. The mirror serves the same CDN prefix as the runtime,
  * so the installer downloads at mirror speed instead of stalling on a direct
  * GitHub link. The environment variable overrides the default.
+ *
+ * Gitee has no `releases/latest` alias, so the desktop maintains a fixed
+ * `stable` release whose assets (latest.yml + installer + blockmap) are
+ * refreshed on every publish. The app points here; the same stable release
+ * also serves the runtime-manifest.json + runtime zip for thin-shell builds.
  */
 function appUpdateFeedUrl(): string | undefined {
   if (!app.isPackaged) return undefined
-  return process.env.DSH_APP_UPDATE_URL ?? 'https://gh-proxy.com/https://github.com/yxx-jf/deepseek-harness-desktop/releases/download/v0.1.0-rc.12/'
+  return process.env.DSH_APP_UPDATE_URL
+    ?? 'https://gitee.com/yixiao-xiao/dsh-pc-release/releases/download/stable/'
 }
 
 /**
- * Set proxy bypass rules on the default session so the runtime download
- * uses the default `net.fetch` (no custom stream conversion). System proxies
- * on Windows often return HTTP 502 for GitHub release downloads, making
- * every candidate fail. Bypassing the proxy for GitHub hosts lets the
- * download go through the direct (fast) path.
+ * Force the default session to connect DIRECTLY, bypassing any system proxy.
+ *
+ * The runtime/update downloads come from Gitee (a mainland-China host) which
+ * is fastest when connected directly; system proxies (Clash etc.) route the
+ * request through an overseas exit that Gitee's CDN rejects with HTTP 403.
+ * GitHub release downloads, when still used, go through the gh-proxy mirror
+ * list which is also reached directly. Setting mode 'direct' makes every
+ * `net.fetch` bypass the system proxy so the domestic path always works.
  */
 async function setupRuntimeDownloadProxy(): Promise<void> {
   try {
-    await session.defaultSession.setProxy({
-      proxyBypassRules: 'github.com,*.github.com,*.githubusercontent.com,gh-proxy.com',
-    })
+    await session.defaultSession.setProxy({ mode: 'direct' })
   } catch {
-    // Non-fatal: proxy bypass is best-effort; without it the download may
-    // still succeed through a mirror that works with the system proxy.
+    // Non-fatal: direct mode is best-effort; without it the download may
+    // still succeed if no system proxy is present.
   }
 }
 
@@ -419,16 +426,19 @@ async function resolveHostPaths(splash: SplashSurface | undefined, skipRuntimeUp
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return hostPaths(join(process.resourcesPath, 'host'))
 
-  // Bypass the system proxy for GitHub hosts — many proxies return 502 for
-  // release downloads, which kills every candidate before the mirror is tried.
+  // Bypass the system proxy so the Gitee download always uses the direct
+  // (fast) path. The runtime now ships from Gitee, a domestic host, so no
+  // GitHub-style mirror is prepended; DSH_RUNTIME_MIRRORS still allows an
+  // explicit mirror list for unusual networks. The archive is fetched from
+  // manifest.url (the ZIP) directly — no candidates are passed in, so
+  // ensureRuntime builds its list from the manifest's own URL.
   await setupRuntimeDownloadProxy()
 
   const runtimeDir = join(app.getPath('userData'), 'host')
-  const mirrorPrefixes = (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
+  const mirrorPrefixes = (process.env.DSH_RUNTIME_MIRRORS ?? '')
       .split(',')
       .map(mirror => mirror.trim())
       .filter(mirror => mirror.length > 0)
-  const candidates = await rankMirrorsBySpeed((input, init) => net.fetch(input instanceof URL ? input.href : input, init), manifestUrl, mirrorPrefixes)
   const outcome = await ensureRuntime({
     manifestUrl,
     runtimeDir,
@@ -436,7 +446,7 @@ async function resolveHostPaths(splash: SplashSurface | undefined, skipRuntimeUp
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
     downloadStallTimeoutMs: 60_000,
     downloadRetries: 1,
-    candidates,
+    mirrorPrefixes,
     // Parallel workers inflate and write concurrently; the serial path is
     // the fallback for archives or environments the parallel path cannot
     // handle (the serial extractor re-creates the destination first).
@@ -551,6 +561,232 @@ function readSubscriptions(): Record<string, PluginSubscription> {
 function writeSubscriptions(subs: Record<string, PluginSubscription>): void {
   mkdirSync(PLUGIN_CLONE_DIR, { recursive: true })
   writeFileSync(subscriptionsFile(), JSON.stringify(subs, null, 2))
+}
+
+/**
+ * Make the official dsh-market bundle available in the web profile before
+ * the Host is spawned.
+ *
+ * Host bundle resolution is two-anchored: the bundle MANIFEST resolves from
+ * the dsh installation (`resources/host` packaged) or the profile, but its
+ * patch inserts a loader entry whose bare module name (`dshmarket`) is
+ * resolved from the PROFILE directory's node_modules parent walk. So the
+ * package itself must be visible at `~/.dsh/profiles/web/node_modules/`:
+ *
+ * - Development installs it once with `dsh plugin --profile web add
+ *   dshmarket` (pnpm links the package and its peers in the profile).
+ * - Packaged, pnpm is unavailable, so the market is junctioned in from the
+ *   bundled runtime closure. All of the market's peers live flat in the same
+ *   `resources/host/node_modules` tree, so importing `@deepseek-ai/…` from
+ *   the junction's realpath resolves there and never escapes the closure.
+ *
+ * Failure degrades rather than bricks the app: if the package cannot be made
+ * visible the bundle reference is removed from the manifest, so an upgrade
+ * from a broken launch never leaves an unresolvable `dshmarket` in the user's
+ * profile (which is what crashes the Host with ERR_MODULE_NOT_FOUND).
+ */
+async function ensureOfficialMarketBundle(): Promise<void> {
+  const pkgPath = join(WEB_PROFILE_DIR, 'package.json')
+  const marketTarget = join(WEB_PROFILE_DIR, 'node_modules/dshmarket')
+  const readManifest = (): { dsh?: { profile?: { bundles?: unknown } } } =>
+    existsSync(pkgPath)
+      ? JSON.parse(readFileSync(pkgPath, 'utf8')) as { dsh?: { profile?: { bundles?: unknown } } }
+      : { dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } } }
+  const writeBundles = (bundles: string[]): void => {
+    const pkg = readManifest()
+    const profile = pkg.dsh?.profile ?? {}
+    pkg.dsh = { ...pkg.dsh, profile: { ...profile, bundles } }
+    if (pkg.dsh.profile === undefined) throw new Error('invalid web profile manifest')
+    writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
+  }
+  try {
+    mkdirSync(WEB_PROFILE_DIR, { recursive: true })
+
+    // Stage 1 — make the package visible to the profile's module resolution.
+    let visible = existsSync(join(marketTarget, 'package.json'))
+    if (!visible) {
+      if (app.isPackaged) {
+        // Thin shell: the runtime is downloaded into userData/host and the
+        // market lives flat in its node_modules; full installers bundle it
+        // under resources/host. packagedRuntimeRoot() picks whichever is real.
+        const packagedRoot = packagedRuntimeRoot()
+        const source = packagedRoot === undefined
+          ? join(process.resourcesPath, 'host/node_modules/dshmarket')
+          : join(packagedRoot, 'node_modules/dshmarket')
+        if (existsSync(join(source, 'package.json'))) {
+          // Junction (not copy) keeps a single on-disk closure; peers resolve
+          // through the shared flat node_modules next to the source.
+          mkdirSync(dirname(marketTarget), { recursive: true })
+          symlinkSync(realpathSync(source), marketTarget, 'junction')
+          visible = true
+        }
+      } else {
+        // Development: official CLI path so pnpm links package + peers.
+        console.log('desktop market: installing official dsh-market into the web profile…')
+        const result = await runDshPlugin(['add', 'dshmarket'])
+        visible = result.ok && existsSync(join(marketTarget, 'package.json'))
+      }
+    }
+    if (!visible) {
+      console.warn('desktop market: dshmarket unavailable; leaving it out of the profile this launch')
+    }
+
+    // Stage 2 — keep `dsh.profile.bundles` consistent with what is resolvable.
+    const current = readManifest()
+    const bundles = Array.isArray(current.dsh?.profile?.bundles)
+      ? current.dsh?.profile?.bundles.filter((bundle): bundle is string => typeof bundle === 'string')
+      : ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
+    const hasMarket = bundles.includes('dshmarket')
+    if (visible && !hasMarket) {
+      bundles.push('dshmarket')
+      writeBundles(bundles)
+    } else if (!visible && hasMarket) {
+      // A previous launch wrote the reference but the package is gone now;
+      // drop it so the Host does not crash on an unresolvable loader entry.
+      writeBundles(bundles.filter(bundle => bundle !== 'dshmarket'))
+      console.warn('desktop market: removed stale dshmarket reference from the web profile')
+    }
+  } catch (error) {
+    // Never let market setup take the whole app down. A broken reference is
+    // worse than no market at all: remove it so the Host can boot.
+    console.error('desktop market setup failed:', error instanceof Error ? error.message : String(error))
+    try {
+      if (existsSync(pkgPath)) {
+        const pkg = readManifest()
+        const bundles = Array.isArray(pkg.dsh?.profile?.bundles)
+          ? pkg.dsh.profile.bundles.filter((bundle): bundle is string => typeof bundle === 'string' && bundle !== 'dshmarket')
+          : undefined
+        if (bundles !== undefined) writeBundles(bundles)
+      }
+    } catch {
+      // The profile manifest itself may be unreadable; nothing more to do.
+    }
+  }
+}
+
+/**
+ * Repair pnpm's placeholder-bug in every profile's pnpm-workspace.yaml.
+ *
+ * When an install fails, pnpm writes a LITERAL `set this to true or false`
+ * into the allowBuilds entry instead of a boolean (pnpm issue #11535). The
+ * market's "allow build scripts and retry" then reads a non-boolean value and
+ * keeps blocking the dependency (e.g. node-pty) with ERR_PNPM_IGNORED_BUILDS
+ * forever. This rewrites those placeholder lines to `true` before the market
+ * mounts, so its approval actually sticks. Runs at every boot; no-op when no
+ * profile has a corrupted file.
+ */
+function repairProfileAllowBuildsPlaceholders(): void {
+  let profiles: string[] = []
+  try {
+    profiles = readdirSync(join(DSH_HOME, 'profiles'), { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+  } catch {
+    return // no profiles directory yet — nothing to repair
+  }
+  for (const profile of profiles) {
+    const yamlPath = join(DSH_HOME, 'profiles', profile, 'pnpm-workspace.yaml')
+    if (!existsSync(yamlPath)) continue
+    try {
+      const yaml = readFileSync(yamlPath, 'utf8')
+      if (!yaml.includes('set this to true or false')) continue
+      // `key: set this to true or false` → `key: true`. The key may be a bare
+      // package name or a git form, which itself contains colons
+      // (`name@git+https://…`), so the non-greedy `.*?` anchors on the LAST
+      // `: set this to true or false` and preserves everything before it.
+      const repaired = yaml.replace(
+        /^(\s*\S.*?:\s*)set this to true or false(\s*)$/gm,
+        (_line, prefix: string, suffix: string) => `${prefix}true${suffix}`,
+      )
+      if (repaired !== yaml) {
+        writeFileSync(yamlPath, repaired)
+        console.log(`desktop pnpm workspace: repaired allowBuilds placeholder in ${profile}`)
+      }
+    } catch (error) {
+      console.warn(`desktop pnpm workspace: failed to repair ${yamlPath}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+/**
+ * Point each profile's `@deepseek-ai` scope at the runtime's own scope.
+ *
+ * Legacy/full-installer-era profiles can carry a REAL `node_modules/@deepseek-ai`
+ * directory (independent copies pinned to an older version, e.g. `0.1.0-rc.8`)
+ * left over from an early `pnpm install --node-linker=hoisted` bootstrap. The
+ * patched runtime upgrades to a newer version (e.g. `0.1.2-alpha.1`), and while
+ * bundle entries REFERENCED BY PATH that the profile copy lacks (such as
+ * `@deepseek-ai/dsh-session-log-export`, injected by `dsh-web-app`'s
+ * `cordis.patch.yml`) resolve up the tree into the runtime junction, their
+ * inject-style peer services (`connection`, `commands`) STILL resolve into the
+ * stale profile copy → their apply() sees `ctx.connection === undefined` and
+ * the whole plugin tree fails to load. Fix: replace the stale real directory
+ * with a junction into the runtime's scope so every `@deepseek-ai/*` user in
+ * the profile resolves the same version. Idempotent (never touches junctions,
+ * never touches profiles whose copy already matches the runtime). The stale
+ * directory is renamed aside (not deleted) so nothing is lost.
+ */
+function repairProfileDeepSeekAiScopeOverlay(): void {
+  const runtimeScope = runtimeDeepSeekAiScope()
+  if (!existsSync(runtimeScope)) return
+  let profiles: string[] = []
+  try {
+    profiles = readdirSync(join(DSH_HOME, 'profiles'), { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+  } catch {
+    return
+  }
+  for (const profile of profiles) {
+    const target = join(DSH_HOME, 'profiles', profile, 'node_modules/@deepseek-ai')
+    if (!existsSync(target)) continue
+    const stat = statSyncSafe(target)
+    if (stat === undefined) continue
+    // Junction/symlink already opens the runtime scope (or the user's own) —
+    // leave it alone. A reparse-point check skips both, so this also never
+    // fights what Host itself junctions in.
+    if (stat.isSymbolicLink()) continue
+    // A REAL directory: only replace it when it actually diverges from the
+    // runtime, i.e. it carries a heartbeat package whose version differs.
+    const heartbeat = 'dsh-client-connection'
+    const profileVersion = readPackageVersion(join(target, heartbeat))
+    const runtimeVersion = readPackageVersion(join(runtimeScope, heartbeat))
+    if (profileVersion === undefined || runtimeVersion === undefined) continue
+    if (profileVersion === runtimeVersion) continue // already in sync
+    console.log(`desktop plugin scope: ${profile} has stale @deepseek-ai@${profileVersion} (runtime ${runtimeVersion}) — switching to junction`)
+    const stale = `${target}-legacy-${profileVersion}`
+    try {
+      // Remove any leftover backup of the same version, then move aside & relink.
+      if (existsSync(stale)) rmSync(stale, { recursive: true, force: true })
+      renameSync(target, stale)
+      symlinkSync(runtimeScope, target, 'junction')
+      console.log(`desktop plugin scope: linked ${profile}/node_modules/@deepseek-ai -> runtime ${runtimeVersion} (old copy kept at ${stale})`)
+    } catch (error) {
+      // Best-effort; restore the directory if the relink failed so the profile
+      // never ends up missing its scope entirely.
+      if (!existsSync(target) && existsSync(stale)) renameSync(stale, target)
+      console.warn(`desktop plugin scope: repair failed for ${profile}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+/** lstat wrapper that returns undefined instead of throwing. */
+function statSyncSafe(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path)
+  } catch {
+    return undefined
+  }
+}
+
+/** Read a package's `version` field, or undefined when absent/unreadable. */
+function readPackageVersion(packageJsonPath: string): string | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: unknown }
+    return typeof pkg.version === 'string' ? pkg.version : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Short in-memory cache for GitHub searches (unauthenticated rate limits). */
@@ -738,12 +974,75 @@ function dshCliEntry(): string {
     const dev = join(upstreamRoot, 'apps/cli/lib/bin.js')
     if (existsSync(dev)) return dev
   }
+  if (app.isPackaged) {
+    // Thin shell: the runtime (and its CLI) lives in userData/host; full
+    // installers bundle it under resources/host.
+    const packagedRoot = packagedRuntimeRoot()
+    if (packagedRoot !== undefined) {
+      const entry = join(packagedRoot, HOST_ENTRY)
+      if (existsSync(entry)) return entry
+    }
+  }
   return join(process.resourcesPath, 'host', HOST_ENTRY)
 }
 
 /** The Node executable used to run the dsh CLI in this app context. */
 function dshNodeExecutable(): string {
   return app.isPackaged ? process.execPath : (process.env.DSH_DESKTOP_NODE_EXECUTABLE ?? 'node')
+}
+
+/** Directory holding the bundled standalone pnpm executable, or undefined. */
+function bundledPnpmBinDir(): string | undefined {
+  const root = app.isPackaged
+    ? (packagedRuntimeRoot() ?? join(process.resourcesPath, 'host'))
+    : join(DESKTOP_DIR, 'runtime-host')
+  const pnpmRoot = join(root, 'bin', 'pnpm')
+  return existsSync(join(pnpmRoot, 'pnpm.cmd')) ? pnpmRoot : undefined
+}
+
+/**
+ * Prepend the bundled pnpm bin directory to a PATH value. The plugin market
+ * probes and shells out to `pnpm` for every install, and a packaged desktop
+ * has neither a system pnpm nor npm/corepack to provision one — so the
+ * bundled `pnpm.exe` (staged into `runtime-host/bin/pnpm`) is the one pnpm
+ * the Host can always find. Development keeps its own PATH untouched (the
+ * checkout machine has pnpm).
+ */
+function pathWithBundledPnpm(pathValue: string | undefined): string | undefined {
+  const bin = bundledPnpmBinDir()
+  if (bin === undefined) return pathValue
+  const separator = process.platform === 'win32' ? ';' : ':'
+  const parts = (pathValue ?? '').split(separator).filter(part => part !== '')
+  if (!parts.includes(bin)) parts.unshift(bin)
+  return parts.join(separator)
+}
+
+/**
+ * Make the bundled pnpm visible to every child process (Host, `dsh plugin`,
+ * plugin rebuilds, and the dsh-market's own pnpm probes): prepend its bin
+ * directory to PATH and point `DSH_DESKTOP_NODE_EXECUTABLE` at the Node that
+ * runs the pnpm.cmd shim.
+ *
+ * IMPORTANT: must be (re)called AFTER the remote runtime is downloaded. The
+ * thin shell resolves the runtime into userData/host during boot, and until
+ * that lands `bundledPnpmBinDir()` is undefined — so an early one-shot call
+ * would leave `DSH_DESKTOP_NODE_EXECUTABLE` unset and every later
+ * `pnpm.cmd --version` (the market's probe) would expand the shim's
+ * `%DSH_DESKTOP_NODE_EXECUTABLE%` to nothing and fail.
+ */
+function ensurePnpmEnvironment(): void {
+  const bundledPnpm = bundledPnpmBinDir()
+  if (bundledPnpm !== undefined) {
+    process.env.PATH = pathWithBundledPnpm(process.env.PATH)
+  }
+  // The bundled pnpm.cmd shim invokes "$DSH_DESKTOP_NODE_EXECUTABLE".
+  // Packaged, that is Electron's embedded Node (this process); development
+  // keeps the system node used by dshNodeExecutable(). Set unconditionally
+  // (independent of pnpm presence) so the Host and every market child inherit
+  // a resolvable shim executable even on the very first thin-shell launch.
+  if (process.env.DSH_DESKTOP_NODE_EXECUTABLE === undefined) {
+    process.env.DSH_DESKTOP_NODE_EXECUTABLE = app.isPackaged ? process.execPath : 'node'
+  }
 }
 
 /** Run one command, resolving with its exit code and captured output. */
@@ -781,15 +1080,41 @@ async function runDshPlugin(pnpmArgs: string[]): Promise<{ ok: boolean; message:
   return { ok: true, message: output }
 }
 
+/**
+ * Directory of the packaged Host runtime: the full installer bundles it
+ * under resources/host, while the thin shell downloads it into the per-user
+ * data dir (userData/host). Both trees share the same layout (bin/pnpm,
+ * node_modules/dshmarket, node_modules/@deepseek-ai). Returns null when no
+ * packaged runtime is present.
+ */
+function packagedRuntimeRoot(): string | undefined {
+  const candidates = [
+    // Thin shell: remote runtime installed into the user data directory. This
+    // is the published, patched runtime (native picker, brand, opener), and
+    // it is what resolveHostPaths() selected, so it takes precedence.
+    join(app.getPath('userData'), 'host'),
+    // Full/offline installer: runtime copied into resources/host at pack time.
+    join(process.resourcesPath, 'host'),
+  ]
+  return candidates.find(root => existsSync(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')))
+}
+
 /** Dir holding the runtime's shared `@deepseek-ai/*` packages (used as plugin peer deps). */
 function runtimeDeepSeekAiScope(): string {
-  const candidates = app.isPackaged
-    ? [join(process.resourcesPath, 'host/node_modules/@deepseek-ai')]
-    : [
-        join(DESKTOP_DIR, 'upstream/apps/cli/node_modules/@deepseek-ai'),
-        join(DESKTOP_DIR, 'upstream/node_modules/@deepseek-ai'),
-      ]
-  return candidates.find(p => existsSync(p)) ?? candidates[0]
+  if (app.isPackaged) {
+    const packagedRoot = packagedRuntimeRoot()
+    if (packagedRoot !== undefined) {
+      const scoped = join(packagedRoot, 'node_modules/@deepseek-ai')
+      if (existsSync(scoped)) return scoped
+    }
+    // Fall back to the legacy in-installer layout for old full packages.
+    const legacy = join(process.resourcesPath, 'host/node_modules/@deepseek-ai')
+    if (existsSync(legacy)) return legacy
+  }
+  return [
+    join(DESKTOP_DIR, 'upstream/apps/cli/node_modules/@deepseek-ai'),
+    join(DESKTOP_DIR, 'upstream/node_modules/@deepseek-ai'),
+  ].find(p => existsSync(p)) ?? join(DESKTOP_DIR, 'upstream/node_modules/@deepseek-ai')
 }
 
 /**
@@ -1023,8 +1348,12 @@ function openPluginManager(): void {
 }
 
 async function createMainWindow(): Promise<BrowserWindow> {
-  const origin = hostOrigin
-  if (origin === undefined) throw new Error('desktop Host is not ready')
+  const hostUrl = hostOrigin
+  if (hostUrl === undefined) throw new Error('desktop Host is not ready')
+  // The readiness URL may carry the host's per-boot auth token in its query
+  // (newer `dsh web` hosts reject the page without it), so the window loads
+  // the FULL URL, while navigation allow-list checks still compare bare origins.
+  const origin = new URL(hostUrl).origin
   const window = new BrowserWindow({
     width: WINDOW_WIDTH,
     height: WINDOW_HEIGHT,
@@ -1079,31 +1408,6 @@ async function createMainWindow(): Promise<BrowserWindow> {
       syncTheme()
       new MutationObserver(syncTheme).observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
 
-      /* ── inject plugin manager button into the settings dialog ── */
-      const PLUGIN_BTN_ID = 'dsh-plugin-mgr-btn'
-      const injectBtn = () => {
-        if (document.getElementById(PLUGIN_BTN_ID) !== null) return
-        // The settings panel is the full-viewport modal dialog.
-        const dialog = document.querySelector('[role="dialog"][aria-modal="true"]')
-        if (dialog === null) return
-        // dialog → [nav, content]; content → [header, options]; header → [actions, close]
-        const content = dialog.children[1]
-        if (content === undefined) return
-        const header = content.children[0]
-        if (header === undefined) return
-        const actions = header.children[0]
-        if (actions === undefined) return
-        const btn = document.createElement('button')
-        btn.id = PLUGIN_BTN_ID
-        btn.setAttribute('type', 'button')
-        btn.setAttribute('aria-label', '插件管理')
-        btn.style.cssText = 'display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:none;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600;line-height:30px;cursor:pointer;white-space:nowrap'
-      btn.innerHTML = '⚙ 插件管理'
-        btn.addEventListener('click', () => { api.openPluginManager() })
-        btn.addEventListener('mouseenter', () => { btn.style.background = 'var(--dsw-alias-interactive-bg-hover)' })
-        btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(255,255,255,0.06)' })
-        actions.appendChild(btn)
-      }
       // Override the "打开配置文件" button to call the main-process opener
       // (bypasses the Host API entirely, avoiding the hidden window-station issue).
       const overrideOpenDoc = () => {
@@ -1120,13 +1424,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
         }
       }
       overrideOpenDoc()
-      // Keep re-injecting whenever the DOM changes (dialog opens/closes, React re-renders).
-      injectBtn()
-      new MutationObserver(injectBtn).observe(document.body, { childList: true, subtree: true })
+      // Keep the configuration-file override alive across React re-renders.
       new MutationObserver(overrideOpenDoc).observe(document.body, { childList: true, subtree: true })
     })()`, true).catch(() => {})
   })
-  await window.loadURL(origin)
+  await window.loadURL(hostUrl)
   if (!lifecycle?.isQuitting) window.show()
   return window
 }
@@ -1136,7 +1438,6 @@ function createTray(): void {
   tray.setToolTip(APP_NAME)
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
-    { label: '插件管理…', click: () => { openPluginManager() } },
     { label: '检查更新…', click: () => { void checkAppUpdate(true); void checkRuntimeForUpdates() } },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },
@@ -1167,6 +1468,18 @@ function requestAppQuit(): Promise<void> {
 async function boot(): Promise<void> {
   if (bootQuitPromise !== undefined) return
   wireDesktopBridge()
+  // Bypass any system proxy for every app-initiated fetch (plugin market
+  // GitHub mirrors, the Gitee runtime/update downloads). Gitee is a domestic
+  // host — direct is fastest; system proxies (Clash etc.) route through an
+  // overseas exit that Gitee rejects with HTTP 403.
+  void setupRuntimeDownloadProxy()
+  // Make the bundled standalone pnpm visible to every child the main process
+  // spawns (Host, `dsh plugin`, plugin rebuilds). On the very first
+  // thin-shell launch the runtime is not downloaded yet, so DSH_DESKTOP_NODE_EXECUTABLE
+  // is set here unconditionally; PATH prepend is re-done after the runtime
+  // lands (see resolveHostPaths caller below). No-op when the runtime was not
+  // staged with pnpm.
+  ensurePnpmEnvironment()
   // The splash doubles as the startup surface: update prompts are parented to
   // it (so they float above its always-on-top window) and it paints download
   // and bootstrap progress.
@@ -1205,6 +1518,33 @@ async function boot(): Promise<void> {
       }
     } catch { /* file missing or empty — nothing to open */ }
   }, 800)
+
+  // Directory-picker bridge for the packaged Host. The Host's native Win32
+  // picker drives its dialog through koffi (FFI), which crashes under
+  // Electron-as-node (NAPI ABI mismatch), so a patched worker instead writes a
+  // request file; the main process answers with the real native folder dialog
+  // (dialog.showOpenDialog) and writes the chosen path back. Same bridge
+  // pattern as the file-opener above — the Host child cannot show GUI windows.
+  const PICK_DIR_TMP = join(process.env.TEMP ?? process.env.TMP ?? '', 'dsh-pick-dir.txt')
+  const PICK_DIR_RESULT_TMP = join(process.env.TEMP ?? process.env.TMP ?? '', 'dsh-pick-dir-result.txt')
+  const pickDirTimer = setInterval(() => {
+    try {
+      const title = readFileSync(PICK_DIR_TMP, 'utf8').trim()
+      if (title.length === 0) return
+      // Clear the request immediately so a slow dialog never re-fires; the
+      // worker polls the result file for the answer.
+      writeFileSync(PICK_DIR_TMP, '')
+      void dialog
+        .showOpenDialog({ title, properties: ['openDirectory'] })
+        .then(({ canceled, filePaths }) => {
+          const chosen = canceled || filePaths.length === 0 ? '__CANCELLED__' : filePaths[0]
+          writeFileSync(PICK_DIR_RESULT_TMP, chosen, 'utf8')
+        })
+        .catch(() => {
+          writeFileSync(PICK_DIR_RESULT_TMP, '__CANCELLED__', 'utf8')
+        })
+    } catch { /* file missing or empty — nothing to pick */ }
+  }, 500)
   // Serial update sequence: decide the app update first, then the runtime.
   // Accepting or declining the app update skips the runtime check this launch
   // — an accepted install relaunches the app, and that relaunch (now up to
@@ -1239,8 +1579,24 @@ async function boot(): Promise<void> {
   try {
     const paths = await resolveHostPaths(splash, skipRuntimeUpdate)
     assertHostArtifacts(paths)
+    // The thin-shell runtime is now installed under userData/host, so the
+    // bundled pnpm (inside that runtime) exists — wire PATH and re-assert
+    // DSH_DESKTOP_NODE_EXECUTABLE for every downstream child (Host, market).
+    ensurePnpmEnvironment()
+    // Repair any pnpm "set this to true or false" placeholder that a failed
+    // install wrote into a profile's allowBuilds block — otherwise the
+    // market's "allow build scripts and retry" never sticks and every install
+    // of a native-build plugin (node-pty etc.) is blocked forever.
+    repairProfileAllowBuildsPlaceholders()
+    // 将官方插件市场 bundle 写入 web profile（开发模式经官方 dsh plugin 安装，
+    // 打包模式从内置运行时的依赖闭包解析），使设置页出现「Plugin Market」，
+    // 替代旧的 GitHub 搜索/clone 链路。
+    await ensureOfficialMarketBundle()
     // 启动时确保已启用插件能解析运行时 peer 依赖
     ensurePluginRuntimeLinks()
+    // 修复历史遗留的 profile 旧版 @deepseek-ai 覆盖目录（早期 hoisted 安装残留），
+    // 换成指向运行时 scope 的 junction，避免 bundle 插件拿到错配的服务版本而崩
+    repairProfileDeepSeekAiScopeOverlay()
     // 重建主入口文件缺失的插件（如之前启用但未构建的）
     await rebuildMissingPluginEntries()
     host = createHostSupervisor({
@@ -1250,6 +1606,22 @@ async function boot(): Promise<void> {
         env: {
           ...process.env,
           DSH_DESKTOP: '1',
+          // The Host runs under ELECTRON_RUN_AS_NODE, where the native Win32
+          // picker's koffi FFI crashes (NAPI ABI mismatch). A patched worker
+          // sees this flag and routes the folder pick through the main
+          // process's dialog.showOpenDialog (the real native dialog) via a
+          // temp-file request/result bridge.
+          ...(app.isPackaged ? { DSH_DESKTOP_BRIDGE_PICKER: '1' } : {}),
+          // Explicitly handed to the Host (not only inherited from process.env)
+          // so the bundled pnpm.cmd shim always has a resolvable executable,
+          // even on the very first thin-shell launch.
+          DSH_DESKTOP_NODE_EXECUTABLE: app.isPackaged ? process.execPath : 'node',
+          // Explicitly set DSH_FORCE_DIRECTORY_PICKER=browse only to opt back
+          // into the simplified non-native backend (troubleshooting knob).
+          ...(process.env.DSH_FORCE_DIRECTORY_PICKER !== undefined
+            ? { DSH_FORCE_DIRECTORY_PICKER: process.env.DSH_FORCE_DIRECTORY_PICKER }
+            : {}),
+          PATH: pathWithBundledPnpm(process.env.PATH),
         },
       }),
       log: chunk => process.stderr.write(chunk),
@@ -1295,7 +1667,7 @@ async function checkRuntimeForUpdates(): Promise<void> {
   const manifestUrl = packagedManifestUrl()
   if (manifestUrl === undefined) return
   const runtimeDir = join(app.getPath('userData'), 'host')
-  const mirrors = (process.env.DSH_RUNTIME_MIRRORS ?? 'https://gh-proxy.com/')
+  const mirrors = (process.env.DSH_RUNTIME_MIRRORS ?? '')
     .split(',')
     .map(mirror => mirror.trim())
     .filter(mirror => mirror.length > 0)

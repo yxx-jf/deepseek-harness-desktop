@@ -26,18 +26,35 @@ const staging = join(desktopRoot, 'runtime-host')
 const fingerprintFile = join(staging, '.stage-fingerprint.json')
 const hostEntry = join(staging, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
 
+/** One ordered byte slice of the runtime archive, downloaded in parallel. */
+interface RuntimePart {
+  readonly name: string
+  readonly url: string
+  readonly sha256: string
+  readonly size: number
+}
+
 /** Published runtime manifest consumed by the desktop shell. */
 interface RuntimeManifest {
   readonly version: string
   readonly url: string
   readonly sha256: string
   readonly size: number
+  /**
+   * Optional ordered slices of the archive. When present, the shell downloads
+   * every part in parallel (Gitee caps each connection at ~2 MB/s, so parallel
+   * connections multiply throughput) and concatenates them before verifying
+   * the whole-archive SHA-256.
+   */
+  readonly parts?: readonly RuntimePart[]
 }
 
 interface PublishOptions {
   readonly baseUrl: string
   readonly writeConfig: boolean
   readonly outDir: string
+  /** Number of archive slices to publish for parallel download (default 8). */
+  readonly parts: number
 }
 
 /** Parse the CLI, defaulting the base URL to DSH_RUNTIME_PUBLISH_URL. */
@@ -45,6 +62,7 @@ function parseArgs(argv: readonly string[]): PublishOptions {
   let baseUrl = process.env.DSH_RUNTIME_PUBLISH_URL
   let writeConfig = false
   let outDir = join(desktopRoot, 'dist', 'runtime')
+  let parts = Number(process.env.DSH_RUNTIME_PARTS ?? '8')
   for (let i = 0; i < argv.length; i += 1) {
     const argument = argv[i]
     if (argument === '--url') {
@@ -54,6 +72,12 @@ function parseArgs(argv: readonly string[]): PublishOptions {
       i += 1
     } else if (argument === '--write-config') {
       writeConfig = true
+    } else if (argument === '--parts') {
+      const value = argv[i + 1]
+      if (value === undefined) throw new Error('publish-runtime: --parts requires a count argument')
+      parts = Math.max(1, Math.floor(Number(value)))
+      if (!Number.isFinite(parts)) throw new Error('publish-runtime: --parts must be a number')
+      i += 1
     } else if (argument === '--out') {
       const value = argv[i + 1]
       if (value === undefined) throw new Error('publish-runtime: --out requires a directory argument')
@@ -66,7 +90,7 @@ function parseArgs(argv: readonly string[]): PublishOptions {
   if (baseUrl === undefined || baseUrl.length === 0) {
     throw new Error('publish-runtime: missing base URL (pass --url or set DSH_RUNTIME_PUBLISH_URL)')
   }
-  return { baseUrl: baseUrl.replace(/\/+$/u, ''), writeConfig, outDir }
+  return { baseUrl: baseUrl.replace(/\/+$/u, ''), writeConfig, outDir, parts }
 }
 
 /** Re-stage the runtime so the published archive always matches the checkout. */
@@ -111,7 +135,10 @@ const ZIP_MTIME = new Date('2020-01-01T00:00:00Z')
  * ~500 MB, which is acceptable for a one-shot publish step.
  * @returns The archive SHA-256 and compressed size.
  */
-async function createRuntimeArchive(sourceRoot: string, outFile: string): Promise<{ sha256: string; size: number }> {
+async function createRuntimeArchive(
+  sourceRoot: string,
+  outFile: string,
+): Promise<{ sha256: string; size: number; data: Uint8Array }> {
   await mkdir(dirname(outFile), { recursive: true })
   const files: Record<string, Uint8Array> = {}
   for (const file of (await walkFiles(sourceRoot)).sort()) {
@@ -123,7 +150,41 @@ async function createRuntimeArchive(sourceRoot: string, outFile: string): Promis
   await writeFile(outFile, archive)
   const hash = createHash('sha256')
   hash.update(archive)
-  return { sha256: hash.digest('hex'), size: archive.byteLength }
+  return { sha256: hash.digest('hex'), size: archive.byteLength, data: archive }
+}
+
+/**
+ * Split an archive into `count` ordered byte slices. Slices are stored under
+ * `name.part0..N-1` and each gets its own SHA-256 so a corrupted part can be
+ * retried in isolation; the shell re-verifies the whole concatenation against
+ * the manifest sha256 before installing.
+ */
+async function splitArchiveIntoParts(
+  data: Uint8Array,
+  count: number,
+  outDir: string,
+  name: string,
+  baseUrl: string,
+): Promise<RuntimePart[]> {
+  const sliceSize = Math.ceil(data.length / count)
+  const parts: RuntimePart[] = []
+  for (let i = 0; i < count; i += 1) {
+    const start = i * sliceSize
+    if (start >= data.length) break
+    const end = Math.min(data.length, start + sliceSize)
+    const slice = data.subarray(start, end)
+    const partName = `${name}.part${i}`
+    await writeFile(join(outDir, partName), slice)
+    const hash = createHash('sha256')
+    hash.update(slice)
+    parts.push({
+      name: partName,
+      url: `${baseUrl}/${partName}`,
+      sha256: hash.digest('hex'),
+      size: slice.length,
+    })
+  }
+  return parts
 }
 
 async function main(): Promise<void> {
@@ -132,10 +193,11 @@ async function main(): Promise<void> {
 
   // Purge stale outputs from previous runs: content-addressed archive names
   // change between builds, so the output dir must hold only the current
-  // zip + manifest or an uploader may ship a stale zip mismatching the manifest.
+  // zip + parts + manifest or an uploader may ship stale artifacts mismatching
+  // the manifest.
   await rm(join(options.outDir, 'runtime-manifest.json'), { force: true })
   for (const entry of await readdir(options.outDir).catch(() => [])) {
-    if (entry.startsWith('dsh-runtime-') && entry.endsWith('.zip')) {
+    if (entry.startsWith('dsh-runtime-') && (entry.endsWith('.zip') || /^.*\.part\d+$/u.test(entry))) {
       await rm(join(options.outDir, entry), { force: true, recursive: false })
     }
   }
@@ -153,12 +215,20 @@ async function main(): Promise<void> {
   const archiveName = `dsh-runtime-${runtimeVersion}.zip`
 
   const archivePath = join(options.outDir, archiveName)
-  const { sha256, size } = await createRuntimeArchive(staging, archivePath)
+  // The remote runtime must carry the same desktop patches the full installer
+  // applies at afterPack time (native picker, brand label, native path opener),
+  // otherwise thin-shell installs would run an unpatched Host.
+  const { applyRuntimePatches } = await import('./runtime-patches.mjs')
+  await applyRuntimePatches(staging)
+  const { sha256, size, data } = await createRuntimeArchive(staging, archivePath)
   const manifest: RuntimeManifest = {
     version: runtimeVersion,
     url: `${options.baseUrl}/${archiveName}`,
     sha256,
     size,
+  }
+  if (options.parts > 1) {
+    manifest.parts = await splitArchiveIntoParts(data, options.parts, options.outDir, archiveName, options.baseUrl)
   }
   await writeFile(join(options.outDir, 'runtime-manifest.json'), `${JSON.stringify(manifest, undefined, 2)}\n`)
 
@@ -172,6 +242,9 @@ async function main(): Promise<void> {
   }
 
   console.log(`publish-runtime: ${archivePath} (${(size / 1024 / 1024).toFixed(1)} MB, sha256 ${sha256})`)
+  if (manifest.parts !== undefined) {
+    console.log(`publish-runtime: split into ${manifest.parts.length} parallel parts (~${(size / 1024 / 1024 / manifest.parts.length).toFixed(1)} MB each)`)
+  }
   console.log(`publish-runtime: manifest ${join(options.outDir, 'runtime-manifest.json')} -> ${manifest.url}`)
   console.log(`publish-runtime: host the archive and manifest under ${options.baseUrl}, then run dist:desktop`)
 }

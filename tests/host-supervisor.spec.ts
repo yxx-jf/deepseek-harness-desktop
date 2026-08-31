@@ -68,6 +68,20 @@ describe('createHostSupervisor', () => {
     await expect(started).resolves.toBe('http://127.0.0.1:55123')
   })
 
+  it('keeps the auth token in the readiness URL (alpha.1 hosts 401 without it)', async () => {
+    const harness = makeHarness()
+    const started = harness.supervisor.start()
+    harness.host.emitStdout('dsh web: http://127.0.0.1:55123/?token=abc123XYZ\n')
+    await expect(started).resolves.toBe('http://127.0.0.1:55123/?token=abc123XYZ')
+  })
+
+  it('rejects a readiness URL whose query is not the token', async () => {
+    const harness = makeHarness()
+    const started = harness.supervisor.start()
+    harness.host.emitStdout('dsh web: http://127.0.0.1:55123/?other=1\n')
+    await expect(started).rejects.toThrow(/readiness URL/)
+  })
+
   it('forwards Host stdout and stderr after readiness', async () => {
     const harness = makeHarness()
     await ready(harness)

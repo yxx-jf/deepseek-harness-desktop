@@ -17,6 +17,7 @@ import {
   validateManifest,
   type BootstrapProgress,
   type RuntimeManifest,
+  type RuntimePart,
 } from '../src/runtime-bootstrap.ts'
 
 const HOST_ENTRY = 'node_modules/@deepseek-ai/dsh/lib/bin.js'
@@ -103,6 +104,46 @@ function runtimeRoutes(baseUrl: string, archive: Buffer, overrides: Partial<Runt
     }))),
     '/runtime.zip': archive,
   }
+}
+
+/** Split a buffer into `count` roughly equal byte slices (same math as the publisher). */
+function splitBuffer(data: Buffer, count: number): Buffer[] {
+  const size = Math.ceil(data.length / count)
+  const parts: Buffer[] = []
+  for (let i = 0; i < count; i += 1) {
+    const start = i * size
+    if (start >= data.length) break
+    const end = Math.min(data.length, start + size)
+    parts.push(data.subarray(start, end))
+  }
+  return parts
+}
+
+/** Build a manifest with ordered parts plus routes serving each part. */
+function runtimeRoutesWithParts(
+  baseUrl: string,
+  archive: Buffer,
+  partCount: number,
+): { routes: Record<string, Buffer>; parts: RuntimePart[] } {
+  const slices = splitBuffer(archive, partCount)
+  const parts: RuntimePart[] = slices.map((slice, index) => ({
+    name: `runtime.zip.part${index}`,
+    url: `${baseUrl}/runtime.zip.part${index}`,
+    sha256: sha256Of(slice),
+    size: slice.length,
+  }))
+  const routes: Record<string, Buffer> = {
+    '/runtime-manifest.json': Buffer.from(JSON.stringify(manifest({
+      url: `${baseUrl}/runtime.zip`,
+      sha256: sha256Of(archive),
+      parts,
+    }))),
+    '/runtime.zip': archive,
+  }
+  parts.forEach((part, index) => {
+    routes[`/runtime.zip.part${index}`] = slices[index]
+  })
+  return { routes, parts }
 }
 
 /** Install the given version into runtimeDir without touching the network. */
@@ -329,6 +370,70 @@ describe('ensureRuntime', () => {
     expect(phases[phases.length - 1]).toBe('ready')
     expect(progress[progress.length - 1].percent).toBe(100)
   })
+
+  it('downloads split parts in parallel when the manifest publishes them', async () => {
+    const archive = hostArchive()
+    server = await startServer()
+    const { routes } = runtimeRoutesWithParts(server.baseUrl, archive, 4)
+    server.setRoutes(routes)
+    const outcome = await ensureRuntime({
+      manifestUrl: `${server.baseUrl}/runtime-manifest.json`,
+      runtimeDir,
+      hostEntry: HOST_ENTRY,
+    })
+    expect(outcome.downloaded).toBe(true)
+    expect(outcome.version).toBe('v1')
+    expect(await readInstalledVersion(runtimeDir, HOST_ENTRY)).toBe('v1')
+    expect(await readFile(join(runtimeDir, HOST_ENTRY), 'utf8')).toBe('console.log("host")')
+    // Every part is fetched; the single-file URL is never requested.
+    for (let index = 0; index < 4; index += 1) {
+      expect(server.requested).toContain(`/runtime.zip.part${index}`)
+    }
+    expect(server.requested).not.toContain('/runtime.zip')
+    expect(existsSync(`${runtimeDir}.download`)).toBe(false)
+  })
+
+  it('falls back to the single archive when a part download fails', async () => {
+    const archive = hostArchive()
+    server = await startServer()
+    const { routes } = runtimeRoutesWithParts(server.baseUrl, archive, 4)
+    // Withhold part1: its fetch returns 404 and the parallel path must
+    // fall back to the single-file archive URL.
+    delete routes['/runtime.zip.part1']
+    server.setRoutes(routes)
+    const outcome = await ensureRuntime({
+      manifestUrl: `${server.baseUrl}/runtime-manifest.json`,
+      runtimeDir,
+      hostEntry: HOST_ENTRY,
+      downloadRetries: 0,
+    })
+    expect(outcome.downloaded).toBe(true)
+    expect(outcome.version).toBe('v1')
+    expect(await readInstalledVersion(runtimeDir, HOST_ENTRY)).toBe('v1')
+    expect(server.requested).toContain('/runtime.zip.part1')
+    expect(server.requested).toContain('/runtime.zip')
+  })
+
+  it('falls back to the single archive when a part checksum mismatches', async () => {
+    const archive = hostArchive()
+    server = await startServer()
+    const { routes } = runtimeRoutesWithParts(server.baseUrl, archive, 4)
+    // Corrupt part2's served bytes; the manifest still advertises the real
+    // part SHA-256, so the per-part check fails and the parallel path must
+    // fall back to the single-file archive URL.
+    routes['/runtime.zip.part2'] = Buffer.from('corrupted bytes for part two')
+    server.setRoutes(routes)
+    const outcome = await ensureRuntime({
+      manifestUrl: `${server.baseUrl}/runtime-manifest.json`,
+      runtimeDir,
+      hostEntry: HOST_ENTRY,
+      downloadRetries: 0,
+    })
+    expect(outcome.downloaded).toBe(true)
+    expect(await readInstalledVersion(runtimeDir, HOST_ENTRY)).toBe('v1')
+    expect(server.requested).toContain('/runtime.zip.part2')
+    expect(server.requested).toContain('/runtime.zip')
+  })
 })
 
 describe('extractZip', () => {
@@ -391,6 +496,36 @@ describe('validateManifest', () => {
 
   it('rejects a manifest with an invalid sha256', () => {
     expect(() => { validateManifest(manifest({ sha256: 'zzz' })) }).toThrow(/sha256/)
+  })
+
+  it('accepts a manifest with valid parts', () => {
+    const goodPart: RuntimePart = {
+      name: 'runtime.zip.part0',
+      url: 'http://example.com/runtime.zip.part0',
+      sha256: '0'.repeat(64),
+      size: 1024,
+    }
+    expect(() => { validateManifest(manifest({ parts: [goodPart] })) }).not.toThrow()
+  })
+
+  it('rejects a manifest with a non-http part URL', () => {
+    const badPart: RuntimePart = {
+      name: 'runtime.zip.part0',
+      url: 'ftp://example.com/runtime.zip.part0',
+      sha256: '0'.repeat(64),
+      size: 1024,
+    }
+    expect(() => { validateManifest(manifest({ parts: [badPart] })) }).toThrow(/invalid part/)
+  })
+
+  it('rejects a manifest with an invalid part sha256', () => {
+    const badPart: RuntimePart = {
+      name: 'runtime.zip.part0',
+      url: 'http://example.com/runtime.zip.part0',
+      sha256: 'zzz',
+      size: 1024,
+    }
+    expect(() => { validateManifest(manifest({ parts: [badPart] })) }).toThrow(/invalid part/)
   })
 })
 
