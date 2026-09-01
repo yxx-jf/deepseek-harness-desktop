@@ -28,7 +28,7 @@ const RUNTIME_ROOT = resolve(process.argv[2] ?? join(DESKTOP_ROOT, 'runtime-host
 
 /** Patch the native directory picker (worker IPC stdout fallback) and force the pure-Node browse backend. */
 export async function patchNativePicker(runtimeRoot) {
-  const { patchNativePicker, patchAutoPickerForceBrowse, patchWorkerDesktopBridge } = await import('./patch-native-picker.mjs')
+  const { patchNativePicker, patchAutoPickerForceBrowse, patchWorkerDesktopBridge, patchMarketGitResolve } = await import('./patch-native-picker.mjs')
   patchNativePicker(runtimeRoot)
   // The packaged Host runs under ELECTRON_RUN_AS_NODE, where koffi (the FFI the
   // worker uses to drive the Win32 dialog) crashes with a NAPI ABI mismatch. A
@@ -38,6 +38,9 @@ export async function patchNativePicker(runtimeRoot) {
   // The native Win32 backend's spawned Electron child is unreliable when
   // packaged, so force the pure-Node browse backend on every packaged boot.
   patchAutoPickerForceBrowse(runtimeRoot)
+  // The packaged environment has no git, so let the market resolve GitHub
+  // plugins over HTTP (commit-pinned) instead of pnpm's git ls-remote.
+  patchMarketGitResolve(runtimeRoot)
 }
 
 /**

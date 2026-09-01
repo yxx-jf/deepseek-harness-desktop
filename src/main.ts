@@ -1660,6 +1660,13 @@ async function boot(): Promise<void> {
           ...(process.env.DSH_FORCE_DIRECTORY_PICKER !== undefined
             ? { DSH_FORCE_DIRECTORY_PICKER: process.env.DSH_FORCE_DIRECTORY_PICKER }
             : {}),
+          // The packaged environment has no `git`, so pnpm cannot resolve
+          // `github:owner/repo` plugin targets itself. The market's accelerator
+          // resolves HEAD over HTTP, and this mirror gives it a reliable route
+          // (same style as the runtime-download mirrors, no trailing slash).
+          ...(app.isPackaged
+            ? { DSHM_GITHUB_PROXY: process.env.DSHM_GITHUB_PROXY ?? 'https://gh-proxy.com' }
+            : {}),
           PATH: pathWithBundledPnpm(process.env.PATH),
         },
       }),

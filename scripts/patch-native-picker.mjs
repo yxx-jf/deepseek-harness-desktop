@@ -230,6 +230,103 @@ export function patchAutoPickerForceBrowse(runtimeRoot = RUNTIME_ROOT) {
   return null
 }
 
+/**
+ * Make the dsh-market install GitHub-source plugins without a `git` binary.
+ *
+ * WHY: the market hands pnpm a `github:owner/repo` (or
+ * `github:owner/repo#path:/sub` for monorepo subpackages) dependency for
+ * GitHub-hosted plugins, and pnpm resolves the unpinned shortcut with
+ * `git ls-remote` — which the packaged desktop (and many user machines) does
+ * not have, failing with `git ls-remote failed: 'git' 不是内部或外部命令`.
+ * The market's own accelerator (lib/accelerate.js) already resolves HEAD over
+ * plain HTTP (`/info/refs?service=git-upload-pack`, no git needed) and rewrites
+ * the target to a commit-pinned `github:owner/repo#<sha>`, which pnpm downloads
+ * straight from codeload.github.com without ever invoking git. But
+ * `acceleratedTarget` bails out early when the region has no GitHub mirror
+ * (`githubProxy === null`, the default `global` region), leaving the unpinned
+ * shortcut in place and forcing pnpm down the git path.
+ *
+ * This patch replaces `acceleratedTarget` so it always resolves HEAD through
+ * HTTP (a default `https://gh-proxy.com` mirror, overridable via
+ * `DSHM_GITHUB_PROXY`) and pins the commit — for BOTH bare repos and `#path:`
+ * subpath selectors (kept as `&path:/...` after the pinned SHA, pnpm's syntax
+ * for a pinned subpath, see sources.js `githubTargetAtCommit`). Every GitHub
+ * install then avoids git entirely.
+ *
+ * The edits target the COMPILED lib/ file (what the runtime actually loads),
+ * applied idempotently on every build.
+ */
+export function patchMarketGitResolve(runtimeRoot = RUNTIME_ROOT) {
+  const indexPath = join(runtimeRoot, 'node_modules', 'dshmarket', 'lib', 'accelerate.js')
+  if (!existsSync(indexPath)) {
+    console.warn(`[patch-market-git] runtime has no dshmarket accelerate at ${indexPath}; skipping`)
+    return
+  }
+  console.log(`[patch-market-git] enabling no-git GitHub resolution in ${runtimeRoot}`)
+
+  if (hasMarker(indexPath, 'DSHM_GITHUB_RESOLVE_V2')) {
+    console.log('  = market git resolve already patched')
+    return
+  }
+
+  const text = readFileSync(indexPath, 'utf8')
+  const signature = 'export async function acceleratedTarget(target, region, env = process.env) {'
+  const start = text.indexOf(signature)
+  if (start === -1) {
+    console.warn('  ! market acceleratedTarget signature not found (skipped)')
+    return
+  }
+  // The function ends with its finally/timer close; resolveHeadCommit (defined
+  // earlier in the file) shares the same tail, so anchor from the signature's
+  // offset to grab THIS function's closing brace.
+  const tail = 'clearTimeout(timer);\n    }\n}'
+  const tailAt = text.indexOf(tail, start)
+  if (tailAt === -1) {
+    console.warn('  ! market acceleratedTarget tail not found (skipped)')
+    return
+  }
+  const end = tailAt + tail.length
+  const original = text.slice(start, end)
+
+  // v2 body: resolve HEAD over HTTP (mirror default, overridable via
+  // DSHM_GITHUB_PROXY) and pin the commit for BOTH bare repos and #path:/
+  // subpath selectors (pnpm's pinned-subpath syntax `#<sha>&path:/...`).
+  const v2 = [
+    'export async function acceleratedTarget(target, region, env = process.env) {',
+    '    /* DSHM_GITHUB_RESOLVE_V2 (desktop): resolve HEAD over HTTP even without',
+    '       a region mirror so pnpm never needs the git binary for github: plugins,',
+    '       pinning both bare repos and #path:/ subpath selectors. */',
+    '    const proxy = routesFor(region, env).githubProxy ?? "https://gh-proxy.com";',
+    '    const shortcut = /^github:([A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+?)(?:\\.git)?(?:#(.*))?$/.exec(target);',
+    '    if (shortcut === null)',
+    '        return target;',
+    '    const repo = shortcut[1];',
+    '    let subpath = null;',
+    '    for (const selector of (shortcut[2] ?? \'\').split(\'&\')) {',
+    '        const pathMatch = /^path:\\/(.+)$/.exec(selector);',
+    '        if (pathMatch !== null) subpath = pathMatch[1];',
+    '    }',
+    '    const controller = new AbortController();',
+    '    const timer = setTimeout(() => { controller.abort(); }, RESOLVE_TIMEOUT_MS);',
+    '    try {',
+    '        const sha = await headCommit(repo, proxy, controller.signal);',
+    '        if (sha === null) {',
+    '            logEvent(\'info\', \'region\', `${repo}: could not resolve a commit through the mirror; installing directly`);',
+    '            return target;',
+    '        }',
+    '        return `github:${repo}#${sha}${subpath === null ? \'\' : `&path:/${subpath}`}`;',
+    '    }',
+    '    finally {',
+    '        clearTimeout(timer);',
+    '    }',
+    '}',
+  ].join('\n')
+
+  writeFileSync(indexPath, `${text.slice(0, start)}${v2}${text.slice(end)}`)
+  console.log(`  + market: v2 no-git GitHub resolution (${original.includes('DSHM_FORCE_GITHUB_RESOLVE') ? 'upgraded' : 'pristine'})`)
+  return null
+}
+
 // Allow import as a module (from verify-packaged-runtime / release scripts) and
 // direct CLI execution.
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -238,6 +335,7 @@ if (isMain) {
     patchNativePicker()
     patchWorkerDesktopBridge()
     patchAutoPickerForceBrowse()
+    patchMarketGitResolve()
   } catch (error) {
     console.error(`[patch-native-picker] FAILED: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)
