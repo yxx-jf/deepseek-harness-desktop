@@ -1379,10 +1379,20 @@ async function createMainWindow(): Promise<BrowserWindow> {
   // The loaded dsh web page sets its own <title> (which leaks build labels
   // like "… build …"); lock the window title to the product name so no
   // internal build string shows in the title bar or task switcher.
+  // The title is hard-coded to APP_NAME on every possible path: window
+  // creation, each page-title update, and after every navigation event, so
+  // it can never drift to anything else.
+  const lockWindowTitle = (): void => {
+    if (!window.isDestroyed()) window.setTitle(APP_NAME)
+  }
   window.on('page-title-updated', (event) => {
     event.preventDefault()
-    window.setTitle(APP_NAME)
+    lockWindowTitle()
   })
+  window.webContents.on('did-navigate', lockWindowTitle)
+  window.webContents.on('did-navigate-in-page', lockWindowTitle)
+  window.webContents.on('did-finish-load', lockWindowTitle)
+  lockWindowTitle()
   window.webContents.on('will-navigate', (event, url) => {
     if (hasOrigin(url, origin)) return
     event.preventDefault()
@@ -1426,6 +1436,35 @@ async function createMainWindow(): Promise<BrowserWindow> {
       overrideOpenDoc()
       // Keep the configuration-file override alive across React re-renders.
       new MutationObserver(overrideOpenDoc).observe(document.body, { childList: true, subtree: true })
+
+      /* ── sidebar brand title lock ── */
+      // The web UI shows a local-build brand label ("DSH 本地构建" /
+      // "DSH Local Build"). Hard-code the sidebar brand title to the product
+      // name here (shell-side injection, NOT an upstream edit) so it stays
+      // identical.
+      // TEXT-ONLY: rewrite the label's text node value directly. We never
+      // touch DOM structure, classes, fonts, colors or layout — a naive
+      // textContent assignment would destroy child nodes and visually change
+      // the label, which is exactly what must be avoided.
+      const FIXED_BRAND_TITLE = 'DeepSeek Harness'
+      const BRAND_LABELS = new Set(['DSH 本地构建', 'DSH Local Build'])
+      const fixSidebarBrand = () => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+        // NOTE: injected JS runs as plain script in the renderer — no TS type
+        // annotations here or the whole block throws a SyntaxError.
+        let textNode
+        while ((textNode = walker.nextNode()) !== null) {
+          const raw = textNode.nodeValue ?? ''
+          if (!BRAND_LABELS.has(raw.trim())) continue
+          textNode.nodeValue = raw.replace(raw.trim(), FIXED_BRAND_TITLE)
+        }
+        // Also pin the page title text (tabs/Alt+Tab), again text-only.
+        if (document.title.includes('DSH') || document.title.includes('本地构建')) {
+          document.title = FIXED_BRAND_TITLE
+        }
+      }
+      fixSidebarBrand()
+      new MutationObserver(fixSidebarBrand).observe(document.body, { childList: true, subtree: true, characterData: true })
     })()`, true).catch(() => {})
   })
   await window.loadURL(hostUrl)
