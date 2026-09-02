@@ -709,6 +709,84 @@ function repairProfileAllowBuildsPlaceholders(): void {
 }
 
 /**
+ * node-pty version the desktop runtime bundles (N-API prebuilds load in both
+ * Electron 43 / ABI 148 and plain Node). npm's stable 1.1.0 ships Node-22
+ * (ABI 127) prebuilds only, which the Host cannot open and which forces
+ * `node-gyp rebuild` on machines without MSVC — the ELIFECYCLE failure users
+ * hit installing terminal plugins like DSH-better-sidebar.
+ */
+const NODE_PTY_PIN = '1.2.0-beta.15'
+
+/**
+ * Pin every profile's transitive `node-pty` to the runtime's N-API build.
+ *
+ * A profile pnpm `overrides` entry replaces whatever version a plugin's
+ * `node-pty` dependency range resolves to (e.g. better-sidebar's `^1.1.0` →
+ * npm stable 1.1.0) with the N-API build the desktop runtime already ships,
+ * so installs stop needing MSVC and the loaded binary actually matches the
+ * Host's ABI. Idempotent: skips a profile that already carries the pin and
+ * supersedes an older pin inside an existing `overrides` block. Runs at every
+ * boot, before the market mounts; no-op when no profile exists yet.
+ */
+function repairProfileNodePtyOverrides(): void {
+  let profiles: string[] = []
+  try {
+    profiles = readdirSync(join(DSH_HOME, 'profiles'), { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+  } catch {
+    return // no profiles directory yet — nothing to repair
+  }
+  for (const profile of profiles) {
+    const yamlPath = join(DSH_HOME, 'profiles', profile, 'pnpm-workspace.yaml')
+    if (!existsSync(yamlPath)) continue
+    try {
+      const yaml = readFileSync(yamlPath, 'utf8')
+      const pinned = `node-pty: ${NODE_PTY_PIN}`
+      if (yaml.includes(pinned)) continue // already pinned
+      const lines = yaml.split('\n')
+      // Locate an existing top-level `overrides:` block, if any.
+      let overridesLine = -1
+      for (let i = 0; i < lines.length; i += 1) {
+        if (/^overrides:\s*$/.test(lines[i])) {
+          overridesLine = i
+          break
+        }
+      }
+      let repaired: string
+      if (overridesLine >= 0) {
+        // Rebuild the block: drop any older node-pty pin, keep everything else,
+        // then append the pinned entry before the next top-level key (or EOF).
+        const block: string[] = []
+        let end = lines.length
+        for (let i = overridesLine + 1; i < lines.length; i += 1) {
+          if (/^\S/.test(lines[i])) {
+            end = i // next top-level key ends the block
+            break
+          }
+          if (/^\s+node-pty:/.test(lines[i])) continue // superseded pin
+          block.push(lines[i])
+        }
+        // Trim trailing blank lines so the appended pin sits flush under the
+        // last real entry of the block.
+        while (block.length > 0 && block[block.length - 1].trim() === '') block.pop()
+        block.push(`  ${pinned}`)
+        repaired = [...lines.slice(0, overridesLine + 1), ...block, ...lines.slice(end)].join('\n')
+      } else {
+        // No overrides block yet — append one at the end.
+        repaired = `${yaml.replace(/\s*$/, '')}\n\noverrides:\n  ${pinned}\n`
+      }
+      if (repaired !== yaml) {
+        writeFileSync(yamlPath, repaired)
+        console.log(`desktop pnpm workspace: pinned node-pty to ${NODE_PTY_PIN} in ${profile}`)
+      }
+    } catch (error) {
+      console.warn(`desktop pnpm workspace: failed to pin node-pty in ${yamlPath}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+/**
  * Point each profile's `@deepseek-ai` scope at the runtime's own scope.
  *
  * Legacy/full-installer-era profiles can carry a REAL `node_modules/@deepseek-ai`
@@ -1627,6 +1705,10 @@ async function boot(): Promise<void> {
     // market's "allow build scripts and retry" never sticks and every install
     // of a native-build plugin (node-pty etc.) is blocked forever.
     repairProfileAllowBuildsPlaceholders()
+    // Pin each profile's transitive node-pty to the runtime's N-API build so
+    // terminal plugins install without MSVC and load in Electron 43 (npm
+    // stable 1.1.0 is Node-22-ABI only and breaks both of those).
+    repairProfileNodePtyOverrides()
     // 将官方插件市场 bundle 写入 web profile（开发模式经官方 dsh plugin 安装，
     // 打包模式从内置运行时的依赖闭包解析），使设置页出现「Plugin Market」，
     // 替代旧的 GitHub 搜索/clone 链路。
