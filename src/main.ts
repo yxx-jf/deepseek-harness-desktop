@@ -1,7 +1,7 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -715,20 +715,81 @@ function repairProfileAllowBuildsPlaceholders(): void {
  * `node-gyp rebuild` on machines without MSVC — the ELIFECYCLE failure users
  * hit installing terminal plugins like DSH-better-sidebar.
  */
-const NODE_PTY_PIN = '1.2.0-beta.15'
 
 /**
- * Pin every profile's transitive `node-pty` to the runtime's N-API build.
+ * Ensure `entry` (an indented line) is present inside the top-level `blockKey`
+ * block of a simple flat YAML document, dropping any block line matched by
+ * `dropPattern` (when given) first. Appends a new block at EOF when the key is
+ * absent. Returns the rebuilt line array.
+ */
+function ensureYamlBlockEntry(lines: string[], blockKey: string, entry: string, dropPattern?: RegExp): string[] {
+  let blockIndex = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i] === `${blockKey}:`) {
+      blockIndex = i
+      break
+    }
+  }
+  if (blockIndex < 0) {
+    // No block yet — append a fresh one at the end (drop blank tail lines).
+    const tail = lines.filter(line => line.trim() !== '')
+    return [...tail, '', `${blockKey}:`, entry]
+  }
+  let end = lines.length
+  for (let i = blockIndex + 1; i < lines.length; i += 1) {
+    if (/^\S/.test(lines[i])) {
+      end = i // next top-level key ends the block
+      break
+    }
+  }
+  const original = lines.slice(blockIndex + 1, end)
+  // Idempotence: when the entry is already present and nothing needs to be
+  // dropped, leave the document byte-for-byte untouched (avoid rewriting the
+  // file on every boot).
+  const needsDrop = dropPattern !== undefined && original.some(line => dropPattern.test(line))
+  const hasEntry = original.some(line => line.trim() === entry.trim())
+  if (!needsDrop && hasEntry) return lines
+  const block: string[] = []
+  for (let i = blockIndex + 1; i < end; i += 1) {
+    if (dropPattern !== undefined && dropPattern.test(lines[i])) continue
+    block.push(lines[i])
+  }
+  while (block.length > 0 && block[block.length - 1].trim() === '') block.pop()
+  if (!block.some(line => line.trim() === entry.trim())) block.push(entry)
+  return [...lines.slice(0, blockIndex + 1), ...block, ...lines.slice(end)]
+}
+
+/**
+ * Pin every profile's transitive `node-pty` to the runtime's N-API build by
+ * pointing at a LOCAL copy of the runtime's own node-pty package.
  *
- * A profile pnpm `overrides` entry replaces whatever version a plugin's
- * `node-pty` dependency range resolves to (e.g. better-sidebar's `^1.1.0` →
- * npm stable 1.1.0) with the N-API build the desktop runtime already ships,
- * so installs stop needing MSVC and the loaded binary actually matches the
- * Host's ABI. Idempotent: skips a profile that already carries the pin and
- * supersedes an older pin inside an existing `overrides` block. Runs at every
- * boot, before the market mounts; no-op when no profile exists yet.
+ * Why a local `file:` override rather than a bare version pin: the npm stable
+ * 1.1.0 ships Node-22 (ABI 127) prebuilds only, which Electron 43 (ABI 148)
+ * cannot open and which force `node-gyp rebuild` on machines without MSVC —
+ * the ELIFECYCLE failure users hit installing terminal plugins. A bare pin to
+ * `1.2.0-beta.15` still downloads from npm, and some mirrors/proxies strip
+ * the prebuilds, so `prebuild.js` exits 1 and the install falls into
+ * `node-gyp` again. Copying the runtime's complete package into
+ * `profile/vendor/node-pty` and overriding to that `file:` target makes
+ * installs independent of the download source and guaranteed complete.
+ *
+ * Idempotent: skips a profile whose vendor copy already matches the runtime
+ * version, supersedes any older node-pty override/allowBuilds entry. Runs at
+ * every boot, before the market mounts; no-op when no profile or runtime is
+ * staged yet.
  */
 function repairProfileNodePtyOverrides(): void {
+  const runtimePtyDir = join(app.getPath('userData'), 'host', 'node_modules', 'node-pty')
+  if (!existsSync(join(runtimePtyDir, 'package.json'))) return // runtime not staged yet
+  let runtimeVersion: string | undefined
+  try {
+    const pkg = JSON.parse(readFileSync(join(runtimePtyDir, 'package.json'), 'utf8')) as { version?: unknown }
+    runtimeVersion = typeof pkg.version === 'string' ? pkg.version : undefined
+  } catch {
+    return
+  }
+  if (runtimeVersion === undefined) return
+
   let profiles: string[] = []
   try {
     profiles = readdirSync(join(DSH_HOME, 'profiles'), { withFileTypes: true })
@@ -738,47 +799,52 @@ function repairProfileNodePtyOverrides(): void {
     return // no profiles directory yet — nothing to repair
   }
   for (const profile of profiles) {
-    const yamlPath = join(DSH_HOME, 'profiles', profile, 'pnpm-workspace.yaml')
+    const profileDir = join(DSH_HOME, 'profiles', profile)
+    const yamlPath = join(profileDir, 'pnpm-workspace.yaml')
     if (!existsSync(yamlPath)) continue
+    // 1) Materialize the runtime's complete node-pty into profile/vendor once.
+    const vendorPtyDir = join(profileDir, 'vendor', 'node-pty')
+    try {
+      let vendorOk = existsSync(join(vendorPtyDir, 'package.json'))
+      if (vendorOk) {
+        try {
+          const vp = JSON.parse(readFileSync(join(vendorPtyDir, 'package.json'), 'utf8')) as { version?: unknown }
+          vendorOk = vp.version === runtimeVersion
+        } catch {
+          vendorOk = false
+        }
+      }
+      if (!vendorOk) {
+        rmSync(vendorPtyDir, { recursive: true, force: true })
+        mkdirSync(dirname(vendorPtyDir), { recursive: true })
+        cpSync(runtimePtyDir, vendorPtyDir, { recursive: true, dereference: true })
+        console.log(`desktop pnpm workspace: materialized node-pty ${runtimeVersion} vendor for ${profile}`)
+      }
+    } catch (error) {
+      console.warn(`desktop pnpm workspace: failed to vendor node-pty for ${profile}: ${error instanceof Error ? error.message : String(error)}`)
+      continue
+    }
+    // 2) Rewrite pnpm-workspace.yaml: override node-pty to the local vendor
+    //    copy and allow its build script under the spec pnpm resolves for
+    //    `file:` deps (verified: pnpm reports `node-pty@file:vendor/node-pty`).
     try {
       const yaml = readFileSync(yamlPath, 'utf8')
-      const pinned = `node-pty: ${NODE_PTY_PIN}`
-      if (yaml.includes(pinned)) continue // already pinned
       const lines = yaml.split('\n')
-      // Locate an existing top-level `overrides:` block, if any.
-      let overridesLine = -1
-      for (let i = 0; i < lines.length; i += 1) {
-        if (/^overrides:\s*$/.test(lines[i])) {
-          overridesLine = i
-          break
-        }
-      }
-      let repaired: string
-      if (overridesLine >= 0) {
-        // Rebuild the block: drop any older node-pty pin, keep everything else,
-        // then append the pinned entry before the next top-level key (or EOF).
-        const block: string[] = []
-        let end = lines.length
-        for (let i = overridesLine + 1; i < lines.length; i += 1) {
-          if (/^\S/.test(lines[i])) {
-            end = i // next top-level key ends the block
-            break
-          }
-          if (/^\s+node-pty:/.test(lines[i])) continue // superseded pin
-          block.push(lines[i])
-        }
-        // Trim trailing blank lines so the appended pin sits flush under the
-        // last real entry of the block.
-        while (block.length > 0 && block[block.length - 1].trim() === '') block.pop()
-        block.push(`  ${pinned}`)
-        repaired = [...lines.slice(0, overridesLine + 1), ...block, ...lines.slice(end)].join('\n')
-      } else {
-        // No overrides block yet — append one at the end.
-        repaired = `${yaml.replace(/\s*$/, '')}\n\noverrides:\n  ${pinned}\n`
-      }
+      let repairedLines = ensureYamlBlockEntry(
+        lines,
+        'allowBuilds',
+        `  'node-pty@file:vendor/node-pty': true`,
+      )
+      repairedLines = ensureYamlBlockEntry(
+        repairedLines,
+        'overrides',
+        '  node-pty: file:./vendor/node-pty',
+        /^\s+node-pty:(?!\s*file:\.\/vendor\/node-pty)/, // supersede any older node-pty pin
+      )
+      const repaired = repairedLines.join('\n')
       if (repaired !== yaml) {
         writeFileSync(yamlPath, repaired)
-        console.log(`desktop pnpm workspace: pinned node-pty to ${NODE_PTY_PIN} in ${profile}`)
+        console.log(`desktop pnpm workspace: pinned node-pty to local vendor in ${profile}`)
       }
     } catch (error) {
       console.warn(`desktop pnpm workspace: failed to pin node-pty in ${yamlPath}: ${error instanceof Error ? error.message : String(error)}`)
