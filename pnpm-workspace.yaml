@@ -18,8 +18,11 @@ onlyBuiltDependencies:
   - esbuild
 allowBuilds:
   # Electron downloads its runtime in postinstall; the desktop shell needs it.
+  '@pnpm/exe': true
   electron: true
   # electron-builder resolves the optional Squirrel target even though this app
   # does not use it; the build script is harmless but we deny it explicitly.
   electron-winstaller: false
   esbuild: true
+minimumReleaseAgeExclude:
+  - dshmarket@1.39.0

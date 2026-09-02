@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-desktop",
   "description": "DeepSeek Harness desktop application with tray-owned Host lifecycle",
-  "version": "0.1.0-rc.38",
+  "version": "0.1.0-rc.39",
   "private": true,
   "type": "module",
   "main": "lib/main.js",
@@ -28,11 +28,12 @@
   },
   "license": "MIT",
   "dependencies": {
-    "dshmarket": "^1.38.0",
+    "dshmarket": "^1.39.0",
     "electron-updater": "^6.8.9",
     "fflate": "^0.8.3"
   },
   "devDependencies": {
+    "@pnpm/exe": "^11.25.0",
     "@types/node": "^22.20.0",
     "electron": "43.4.0",
     "electron-builder": "26.15.3",
