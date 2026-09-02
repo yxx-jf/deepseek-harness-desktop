@@ -1,6 +1,6 @@
 # node-pty 插件安装失败排查记录（进行中）
 
-> 状态：**待续** — rc.41 已发布但用户机器仍未生效，回家继续排查（见「当前未解之谜」）。
+> 状态：**rc.43 已发布** — 本机验证 rc.42 时再触首启崩（Host 崩于 `dsh-session-turn-outline` 无 `lib/index.js`）。定位到真正根因：**runtime 打包依赖 workspace 构建完整性**（缺 lib 的 workspace 包 + vendor 包 package.json 误删）。rc.43：stage 管线加 `repairBrokenPackageEntries` 自愈校验 + workspace 完整重建，runtime 完整。
 > 更新时间：2026-09-02
 
 ## 一、问题现象
@@ -31,30 +31,33 @@ dsh-better-sidebar exit=1 err=ELIFECYCLE: node-pty@1.2.0-beta.15 install: `node 
 | rc.39 | `dshmarket 1.38.0→1.39.0` 修复插件市场与 dsh-settings 兼容 | 插件市场正常 |
 | rc.40 | 首次 node-pty 修复：`repairProfileNodePtyOverrides` 写 `overrides: node-pty: 1.2.0-beta.15`（npm pin） | **未解决**：仍从 npm 下载被裁剪的包 |
 | rc.41 | 改为 vendor 方案：从 runtime 复制完整 node-pty 到 `profile/vendor/node-pty`，override 指向 `file:./vendor/node-pty` | **已发布，但用户机器 override 仍未变 vendor（谜）** |
+| rc.42 | 加固 repair 提前退出路径（落盘 `repair.log` + vendor 复制失败不跳过 YAML + runtime 缺失回退兄弟 profile vendor）+ 手动检查更新串行 | 已发布（本机验证时首启崩：runtime 缺 `lib/`） |
+| rc.43 | stage 加 `repairBrokenPackageEntries`（缺入口包从 registry 自愈 + 扩展名解析修复）；workspace 完整重建（runtime-host 回灌 232 包 lib + tsdown 重建 util-time/util-values/code-runtime-python）；vendor/cordis 误删 git 恢复；清理 build 残留目录；重新发布 | **已发布，运行时完整** |
 
-## 四、当前未解之谜（回家继续的重点）
+## 四、根因候选与 rc.42 加固
 
-用户机器已更新到 rc.41（user agent 确认），但 `dsh-market-log` 里安装错误仍是 **`node-pty@1.2.0-beta.15`**（版本 pin 形式），说明 **pnpm 用的是 override 旧值，`repairProfileNodePtyOverrides` 没把 override 改成 `file:./vendor/node-pty`**。
+用户机器在 rc.41 时 `dsh-market-log` 里安装错误仍是 **`node-pty@1.2.0-beta.15`**（版本 pin 形式），说明 **pnpm 用的是 override 旧值，rc.41 的 `repairProfileNodePtyOverrides` 没把 override 改成 `file:./vendor/node-pty`**。rc.42 已针对该函数的提前退出路径全部加固。
 
 **已排除**：
 - 发布包不含修复代码？→ **否**，`dist/win-unpacked/resources/app.asar` 确认含 `ensureYamlBlockEntry`、`file:./vendor`、`vendor/node-pty`。
 - runtime 里没有 node-pty？→ **否**，`dsh-runtime-0.1.0-rc.41-f093be23134a.zip` 确认含 `node_modules/node-pty/package.json` + `prebuilds/win32-x64/*`。
 - pnpm 沿用旧 lockfile？→ **否**，临时目录实测：已有旧 lockfile（npm pin）后改 override 为 vendor，`pnpm add` 会干净切换到 `node-pty@file:vendor/node-pty`（`resolution: {directory: vendor/node-pty}`）并安装成功。
 
-**可疑点（修复函数提前退出路径，`src/main.ts` `repairProfileNodePtyOverrides`）**：
-1. `const runtimePtyDir = join(app.getPath('userData'), 'host', 'node_modules', 'node-pty')` —— 若该路径不存在 → **直接 `return`**，整个修复跳过。
+**根因候选（rc.41 修复函数提前退出路径，已全部在 rc.42 加固）**：
+1. `const runtimePtyDir = join(app.getPath('userData'), 'host', 'node_modules', 'node-pty')` —— 若该路径不存在 → 原先**直接 `return`**。rc.42：不再因 runtime 缺失放弃，回退到任意 profile 已存在的 `vendor/node-pty` 作为源（跨 profile 自愈）。
    - 注意：`app.getPath('userData')` 在打包应用 = `%APPDATA%\@deepseek-ai\dsh-desktop`（从 user agent `@deepseek-ai/dsh-desktop/0.1.0-rc.41` 推断）。
-2. 读 `runtimePtyDir/package.json` 失败 / version 非 string → `return`。
-3. **vendor 复制（`cpSync`）抛异常 → `continue`，跳过本 profile 的 YAML 改写**（这是最可疑的：vendor 复制失败会连 override 都不改）。
-4. YAML 改写失败 → catch 静默。
+2. 读 `runtimePtyDir/package.json` 失败 / version 非 string → 原先 `return`。rc.42：同样走兄弟 profile 兜底。
+3. **vendor 复制（`cpSync`）抛异常 → 原先 `continue`，跳过本 profile 的 YAML 改写**（最可疑：vendor 复制失败会连 override 都不改）。rc.42：**复制失败不再跳过** YAML 改写——override 是持久目标态，先写对，vendor 复制留到下次 boot 幂等重试。
+4. YAML 改写失败 → 原先 catch 静默。rc.42：全部关键决策/失败都写 `repair.log`。
 
-**待验证（回家后用诊断脚本确认）**：
-- `[1] runtime node-pty 存在?` → 排除/证实提前 return
-- `[3] profile/vendor/node-pty 存在?` → 排除/证实 cpSync 失败 → continue
-- `[2] pnpm-workspace.yaml 的 override 值` → 确认是否仍 `node-pty: 1.2.0-beta.15`
+**远程定位方式（rc.42 起，无需再跑诊断 bat）**：
+- 用户机器正常启动一次 app（让 boot 跑过修复函数），把 `%APPDATA%\@deepseek-ai\dsh-desktop\repair.log` 发回即可。
+- repair.log 会明确给出：runtime 目录是否存在及版本、最终采用的复制源、每个 profile 的 vendor 复制结果（OK/失败原因）、YAML 是否被改写。
+- 若 repair.log 显示 `no node-pty source anywhere` → runtime 没解压出 node-pty（检查 runtime 版本/下载完整性）；若显示 `vendor COPY FAILED` → 重点查杀软/磁盘占用对 `cpSync` 的拦截。
 
 ## 五、诊断方法
 
+0. **直接看 repair.log（rc.42 起）**：用户机器正常启动一次 app，读 `%APPDATA%\@deepseek-ai\dsh-desktop\repair.log`（带时间戳追加，含 runtime 目录/版本、复制源、每 profile vendor 结果、YAML 改写结果）。
 1. **用户机器诊断脚本**（桌面已有 `DSH_node-pty诊断.bat`，仓库 `docs/DSH_node-pty诊断.bat`）：
    - [1] runtime node-pty 是否存在（`%APPDATA%\@deepseek-ai\dsh-desktop\host\node_modules\node-pty`）
    - [2] profile `pnpm-workspace.yaml` 的 override/allowBuilds 内容
@@ -74,22 +77,28 @@ dsh-better-sidebar exit=1 err=ELIFECYCLE: node-pty@1.2.0-beta.15 install: `node 
 
 ## 六、待办清单
 
-- [ ] 用 `DSH_node-pty诊断.bat` 在用户机器跑一次，拿到 [1][2][3] 结果
-- [ ] 根据结果修复 `repairProfileNodePtyOverrides` 的提前退出路径（重点：vendor 复制失败不应跳过 YAML 改写；runtime 缺失时也应保证 override 指向 vendor 或写诊断日志）
-- [ ] 必要时给修复函数加**落盘日志**（主进程 console.log 打包后不可见，可写 `%APPDATA%\@deepseek-ai\dsh-desktop\repair.log`）便于远程定位
-- [ ] 重新发布 rc.42
-- [ ] **更新流程优化**（用户反馈）：手动「检查更新」当前是 `checkAppUpdate(true)` + `checkRuntimeForUpdates()` **并行**触发（`src/main.ts` L1624），造成"外壳下载 + runtime 分包下载同时进行、进入对话界面后又弹安装包"。改为**串行**：先壳层、无更新再 runtime（启动流程已有 `skipRuntimeUpdate`，仅手动入口未串行）。
+- [x] 修复 `repairProfileNodePtyOverrides` 的提前退出路径（rc.42）：vendor 复制失败**不再跳过** YAML 改写；runtime 缺失时回退到兄弟 profile 已 materialized 的 vendor（跨 profile 自愈）
+- [x] 加**落盘日志** `%APPDATA%\@deepseek-ai\dsh-desktop\repair.log`（`appendRepairLog`，带时间戳追加），修复函数所有决策点/失败点都写日志，用户机器无需跑诊断 bat 即可远程定位
+- [x] **更新流程优化**：手动「检查更新」已改为串行（`checkUpdatesSerial`，先 `checkAppUpdate(true)`，仅 `none` 再 `checkRuntimeForUpdates()`），避免壳层 + runtime 并行下载/弹窗
+- [x] **runtime 打包自愈（rc.43）**：`scripts/stage-runtime.ts` 新增 `repairBrokenPackageEntries()` —— deploy 后校验所有包入口（含扩展名解析），缺失入口的包从 npm registry 重取 tarball 覆盖，杜绝缺 lib 的坏包进 runtime
+- [x] 重新发布 rc.43（已上传 Gitee stable：`DeepSeek-Harness-0.1.0-rc.43-x64.exe` + `dsh-runtime-0.1.0-rc.43-93efaf75c29e.zip`，运行时完整）
+- [ ] 请用户更新到 rc.43，查看 `%APPDATA%\@deepseek-ai\dsh-desktop\repair.log` 并重装 `DSH-better-sidebar` 验证安装成功
 - [ ] 收尾清理：桌面调试脚本（`修复DSH插件node-pty.bat`、`DSH_node-pty诊断.bat`）可留作离线兜底
 
 ## 七、相关代码位置
 
 - `src/main.ts`
-  - `repairProfileNodePtyOverrides()`（约 L781）—— 本次修复核心
-  - `ensureYamlBlockEntry()`（约 L725）—— YAML 块注入/幂等
-  - `repairProfileAllowBuildsPlaceholders()`（约 L672）—— 修 pnpm `set this to true or false` 占位 bug
-  - `boot()` 调用点（约 L1777，在 `ensurePnpmEnvironment` 之后、市场挂载之前）
+  - `repairProfileNodePtyOverrides()`（L796）—— 本次修复核心（rc.42 加固：落盘日志 + vendor 复制失败不跳过 YAML + 兄弟 profile 兜底）
+  - `appendRepairLog()`（L766）—— 落盘日志（`userData/repair.log`）
+  - `ensureYamlBlockEntry()`（L724）—— YAML 块注入/幂等
+  - `repairProfileAllowBuildsPlaceholders()`（L677）—— 修 pnpm `set this to true or false` 占位 bug
+  - `checkUpdatesSerial()`（L1656）—— 手动「检查更新」串行入口（先壳层，`none` 再 runtime）
+  - `boot()` 调用点（约 L1819，在 `ensurePnpmEnvironment` 之后、市场挂载之前）
 - `src/updater.ts` —— `checkAppUpdate` / `setupAutoUpdater`（壳层更新）
 - `src/runtime-bootstrap.ts` —— runtime manifest 版本检测/下载
+- `scripts/stage-runtime.ts`
+  - `repairBrokenPackageEntries()`（rc.43）—— deploy 后校验包入口，缺失从 registry 重取（`entryExists` 支持无扩展名 main）
+  - `packageEntry()` / `entryExists()` —— 入口解析与存在性判断（含扩展名推断）
 
 ## 八、关键路径与命令
 

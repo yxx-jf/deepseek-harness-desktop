@@ -32,7 +32,7 @@ const modulesYaml = join(repositoryRoot, 'node_modules/.modules.yaml')
 const fingerprintFile = join(staging, '.stage-fingerprint.json')
 
 /** Bump when the staging procedure changes so stale trees are rebuilt. */
-const STAGE_CACHE_VERSION = 5
+const STAGE_CACHE_VERSION = 6
 
 /** Every workspace package.json glob the runtime manifest derives its closure from. */
 const workspaceManifestGlobs = [
@@ -124,6 +124,105 @@ async function materializeLinks(): Promise<void> {
       filter: path => path !== join(source, 'node_modules') && !path.startsWith(join(source, 'node_modules') + sep),
     })
   }
+}
+
+/** Resolve a package's runtime entry (`exports["."].default`, else `main`). */
+function packageEntry(pkg: Record<string, unknown>): string | undefined {
+  const exportsField = pkg['exports']
+  if (exportsField !== null && typeof exportsField === 'object') {
+    const dot = (exportsField as Record<string, unknown>)['.']
+    if (dot !== null && typeof dot === 'object') {
+      const def = (dot as Record<string, unknown>)['default']
+      if (typeof def === 'string') return def
+    }
+  }
+  const main = pkg['main']
+  return typeof main === 'string' ? main : undefined
+}
+
+/**
+ * Whether the resolved entry file is present, accounting for the extensionless
+ * `main` values Node resolves by trying `.js` / `.json` / `.node` / `.cjs` /
+ * `.mjs`. Without this, common packages whose `main` omits the extension (e.g.
+ * `abort-controller` → `dist/abort-controller`) would be misreported as broken.
+ */
+function entryExists(dir: string, entry: string): boolean {
+  if (existsSync(join(dir, entry))) return true
+  for (const extension of ['.js', '.json', '.node', '.cjs', '.mjs']) {
+    if (existsSync(join(dir, entry + extension))) return true
+  }
+  return false
+}
+
+/**
+ * Repair registry packages whose declared entry file went missing during the
+ * hoisted deploy. Observed: a handful of `@deepseek-ai` bundles stage with
+ * only package.json/README and no `lib/`, while the registry tarball for the
+ * same version is complete — the Host then fails to import them at first
+ * launch (rc.37 / rc.42). Re-fetch the exact version from the registry and
+ * overlay it. Only packages whose entry is absent are touched, so a healthy
+ * tree stays byte-identical. Runs after materializeLinks; fails the build
+ * when the registry cannot supply a missing entry, so a broken runtime can
+ * never be packaged again.
+ */
+async function repairBrokenPackageEntries(): Promise<void> {
+  const root = join(staging, 'node_modules')
+  const dirs: Array<{ dir: string }> = []
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    if (entry.name.startsWith('@')) {
+      const scoped = join(root, entry.name)
+      for (const sub of await readdir(scoped, { withFileTypes: true })) {
+        if (sub.isDirectory()) dirs.push({ dir: join(scoped, sub.name) })
+      }
+    } else {
+      dirs.push({ dir: join(root, entry.name) })
+    }
+  }
+  const broken: Array<{ name: string; version: string; dir: string; entry: string }> = []
+  for (const { dir } of dirs) {
+    const pkgPath = join(dir, 'package.json')
+    if (!existsSync(pkgPath)) continue
+    let pkg: Record<string, unknown>
+    try {
+      pkg = JSON.parse(await readFile(pkgPath, 'utf8')) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const entry = packageEntry(pkg)
+    if (entry === undefined || entryExists(dir, entry)) continue
+    if (typeof pkg['name'] !== 'string' || typeof pkg['version'] !== 'string') continue
+    broken.push({ name: pkg['name'], version: pkg['version'], dir, entry })
+  }
+  if (broken.length === 0) return
+  console.warn(
+    `desktop runtime repair: ${broken.length} package(s) staged without their entry file; re-fetching from registry: `
+    + broken.map(b => `${b.name}@${b.version} (missing ${b.entry})`).join(', '),
+  )
+  const scratch = join(staging, '.repair-scratch')
+  for (const { name, version, dir, entry } of broken) {
+    await rm(scratch, { recursive: true, force: true })
+    await mkdir(scratch, { recursive: true })
+    const spec = `${name}@${version}`
+    try {
+      await run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', spec, '--pack-destination', scratch])
+    } catch (error) {
+      throw new Error(`desktop runtime repair: failed to fetch ${spec} from registry: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const tarballs = (await readdir(scratch)).filter(file => file.endsWith('.tgz'))
+    if (tarballs.length !== 1) throw new Error(`desktop runtime repair: unexpected npm pack output for ${spec}: ${tarballs.join(', ')}`)
+    const extracted = join(scratch, 'pkg')
+    await mkdir(extracted, { recursive: true })
+    await run('tar', ['-xzf', join(scratch, tarballs[0]), '-C', extracted])
+    const packed = join(extracted, 'package')
+    if (!existsSync(join(packed, 'package.json'))) throw new Error(`desktop runtime repair: ${spec} tarball has no package/ root`)
+    // Replace the broken package wholesale with the registry's complete copy.
+    await rm(dir, { recursive: true, force: true })
+    await cp(packed, dir, { recursive: true, force: true, dereference: true })
+    if (!entryExists(dir, entry)) throw new Error(`desktop runtime repair: ${spec} still missing ${entry} after re-fetch`)
+    console.log(`desktop runtime repair: restored ${spec} (${entry}) from registry`)
+  }
+  await rm(scratch, { recursive: true, force: true })
 }
 
 /** Restore peer-specialized workspace packages the legacy hoister placed beside the source manifest. */
@@ -444,6 +543,9 @@ async function main(): Promise<void> {
     await deploy()
     await restoreLegacyHoists()
     await materializeLinks()
+    // Re-fetch any registry package whose entry file vanished during deploy,
+    // so the packaged runtime never ships an un-importable plugin again.
+    await repairBrokenPackageEntries()
     // The flat hoisted layout has no .pnpm virtual store, but a stale one
     // from a prior non-hoisted deploy would inflate the archive beyond the
     // ZIP central directory's 16-bit entry count (65 535).  Drop it if present.

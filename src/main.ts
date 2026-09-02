@@ -1,7 +1,7 @@
 /** Electron application shell for the loopback DeepSeek Harness Web Host. */
 
 import { execFile, spawn } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -387,7 +387,6 @@ async function probeDownloadSpeed(fetchImpl: typeof fetch, url: string, probeByt
     return 0
   }
 }
-
 /**
  * Rank all download candidates (primary URL + mirrors) by measured speed,
  * fastest first. The caller passes the sorted list to ensureRuntime so the
@@ -760,6 +759,19 @@ function ensureYamlBlockEntry(lines: string[], blockKey: string, entry: string, 
 }
 
 /**
+ * Append a line to the on-disk repair log (`userData/repair.log`). The main
+ * process's console output is invisible on user machines, so this is the only
+ * reliable remote trail for diagnosing boot-time repairs.
+ */
+function appendRepairLog(message: string): void {
+  try {
+    appendFileSync(join(app.getPath('userData'), 'repair.log'), `[${new Date().toISOString()}] ${message}\n`)
+  } catch {
+    // Best-effort: a failed log write must never take the repair down.
+  }
+}
+
+/**
  * Pin every profile's transitive `node-pty` to the runtime's N-API build by
  * pointing at a LOCAL copy of the runtime's own node-pty package.
  *
@@ -773,22 +785,18 @@ function ensureYamlBlockEntry(lines: string[], blockKey: string, entry: string, 
  * `profile/vendor/node-pty` and overriding to that `file:` target makes
  * installs independent of the download source and guaranteed complete.
  *
- * Idempotent: skips a profile whose vendor copy already matches the runtime
- * version, supersedes any older node-pty override/allowBuilds entry. Runs at
- * every boot, before the market mounts; no-op when no profile or runtime is
- * staged yet.
+ * Idempotent: a profile whose vendor copy already matches the source version
+ * is left alone, and an older node-pty override/allowBuilds entry is
+ * superseded. Runs at every boot, before the market mounts. A missing runtime
+ * is not fatal — the copy can come from another profile's existing vendor —
+ * and a failed copy still rewrites the override so the durable `file:` target
+ * is in place (retried on the next boot). Every decision lands in `repair.log`
+ * so a user machine can be diagnosed without access to its console.
  */
 function repairProfileNodePtyOverrides(): void {
   const runtimePtyDir = join(app.getPath('userData'), 'host', 'node_modules', 'node-pty')
-  if (!existsSync(join(runtimePtyDir, 'package.json'))) return // runtime not staged yet
-  let runtimeVersion: string | undefined
-  try {
-    const pkg = JSON.parse(readFileSync(join(runtimePtyDir, 'package.json'), 'utf8')) as { version?: unknown }
-    runtimeVersion = typeof pkg.version === 'string' ? pkg.version : undefined
-  } catch {
-    return
-  }
-  if (runtimeVersion === undefined) return
+  const runtimeVersion = readPackageVersion(join(runtimePtyDir, 'package.json'))
+  appendRepairLog(`node-pty repair: runtime pty dir=${runtimePtyDir} version=${runtimeVersion ?? 'n/a'}`)
 
   let profiles: string[] = []
   try {
@@ -796,33 +804,54 @@ function repairProfileNodePtyOverrides(): void {
       .filter(entry => entry.isDirectory())
       .map(entry => entry.name)
   } catch {
+    appendRepairLog('node-pty repair: no profiles directory yet; nothing to repair')
     return // no profiles directory yet — nothing to repair
   }
+  if (profiles.length === 0) {
+    appendRepairLog('node-pty repair: no profiles found; nothing to repair')
+    return
+  }
+
+  // Source of the complete node-pty tree: the runtime's own copy first, else
+  // any profile's already-materialized vendor (self-heal across profiles even
+  // when the runtime is absent or stale).
+  let fallbackSource: { dir: string; version: string } | undefined
+  for (const profile of profiles) {
+    const dir = join(DSH_HOME, 'profiles', profile, 'vendor', 'node-pty')
+    const version = readPackageVersion(join(dir, 'package.json'))
+    if (version !== undefined) {
+      fallbackSource = { dir, version }
+      break
+    }
+  }
+  const source = runtimeVersion !== undefined
+    ? { dir: runtimePtyDir, version: runtimeVersion }
+    : fallbackSource
+  if (source === undefined) {
+    appendRepairLog('node-pty repair: no node-pty source anywhere (runtime missing, no profile vendor); overrides LEFT AS-IS')
+    return
+  }
+  appendRepairLog(`node-pty repair: source=${source.dir} version=${source.version}${runtimeVersion === undefined ? ' (fallback from sibling profile)' : ''}`)
+
   for (const profile of profiles) {
     const profileDir = join(DSH_HOME, 'profiles', profile)
     const yamlPath = join(profileDir, 'pnpm-workspace.yaml')
     if (!existsSync(yamlPath)) continue
-    // 1) Materialize the runtime's complete node-pty into profile/vendor once.
+    // 1) Materialize the source's complete node-pty into profile/vendor once.
     const vendorPtyDir = join(profileDir, 'vendor', 'node-pty')
-    try {
-      let vendorOk = existsSync(join(vendorPtyDir, 'package.json'))
-      if (vendorOk) {
-        try {
-          const vp = JSON.parse(readFileSync(join(vendorPtyDir, 'package.json'), 'utf8')) as { version?: unknown }
-          vendorOk = vp.version === runtimeVersion
-        } catch {
-          vendorOk = false
-        }
-      }
-      if (!vendorOk) {
+    if (readPackageVersion(join(vendorPtyDir, 'package.json')) !== source.version) {
+      appendRepairLog(`node-pty repair: profile ${profile}: vendor missing/mismatched, copying from ${source.dir}`)
+      try {
         rmSync(vendorPtyDir, { recursive: true, force: true })
         mkdirSync(dirname(vendorPtyDir), { recursive: true })
-        cpSync(runtimePtyDir, vendorPtyDir, { recursive: true, dereference: true })
-        console.log(`desktop pnpm workspace: materialized node-pty ${runtimeVersion} vendor for ${profile}`)
+        cpSync(source.dir, vendorPtyDir, { recursive: true, dereference: true })
+        const copied = readPackageVersion(join(vendorPtyDir, 'package.json'))
+        appendRepairLog(`node-pty repair: profile ${profile}: vendor copied, version detected=${copied ?? 'UNREADABLE'}`)
+      } catch (error) {
+        // A failed copy must NOT skip the YAML rewrite below: the override is
+        // the durable end-state and the copy is retried on the next boot.
+        appendRepairLog(`node-pty repair: profile ${profile}: vendor COPY FAILED, still rewriting override -> ${error instanceof Error ? error.message : String(error)}`)
       }
-    } catch (error) {
-      console.warn(`desktop pnpm workspace: failed to vendor node-pty for ${profile}: ${error instanceof Error ? error.message : String(error)}`)
-      continue
     }
     // 2) Rewrite pnpm-workspace.yaml: override node-pty to the local vendor
     //    copy and allow its build script under the spec pnpm resolves for
@@ -844,10 +873,12 @@ function repairProfileNodePtyOverrides(): void {
       const repaired = repairedLines.join('\n')
       if (repaired !== yaml) {
         writeFileSync(yamlPath, repaired)
-        console.log(`desktop pnpm workspace: pinned node-pty to local vendor in ${profile}`)
+        appendRepairLog(`node-pty repair: profile ${profile}: pnpm-workspace.yaml rewritten (override -> file:./vendor/node-pty)`)
+      } else {
+        appendRepairLog(`node-pty repair: profile ${profile}: pnpm-workspace.yaml already correct`)
       }
     } catch (error) {
-      console.warn(`desktop pnpm workspace: failed to pin node-pty in ${yamlPath}: ${error instanceof Error ? error.message : String(error)}`)
+      appendRepairLog(`node-pty repair: profile ${profile}: YAML REWRITE FAILED -> ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 }
@@ -1616,12 +1647,23 @@ async function createMainWindow(): Promise<BrowserWindow> {
   return window
 }
 
+/**
+ * Manual "check for updates": check the app shell first; only when there is no
+ * shell update (or the check failed) move on to the runtime. Parallel checks
+ * could start two downloads at once and pop an install prompt right after the
+ * conversation started — the exact confusion users reported.
+ */
+async function checkUpdatesSerial(): Promise<void> {
+  const decision = await checkAppUpdate(true)
+  if (decision === 'none') await checkRuntimeForUpdates()
+}
+
 function createTray(): void {
   tray = new Tray(trayImage())
   tray.setToolTip(APP_NAME)
   const template: MenuItemConstructorOptions[] = [
     { label: '打开主窗口', click: () => { void lifecycle?.showWindow() } },
-    { label: '检查更新…', click: () => { void checkAppUpdate(true); void checkRuntimeForUpdates() } },
+    { label: '检查更新…', click: () => { void checkUpdatesSerial() } },
     { type: 'separator' },
     { label: '退出', click: () => { void requestAppQuit() } },
   ]
