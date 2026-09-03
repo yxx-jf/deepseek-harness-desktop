@@ -28,6 +28,16 @@ const DESKTOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const RUNTIME_ROOT = resolve(process.argv[2] ?? join(DESKTOP_ROOT, 'runtime-host'))
 const NATIVE_LIB = join(RUNTIME_ROOT, 'node_modules', '@deepseek-ai', 'dsh-host-directory-picker-native', 'lib')
 
+/**
+ * Plugins the desktop marks as officially recommended (shown first / badged
+ * in the market). Keep this list in sync with whatever you actually verify;
+ * it only affects ordering/labelling, never install permission.
+ */
+const DESKTOP_RECOMMENDED_PLUGINS = [
+  // 官方验证兼容新版 dsh-settings（0.18.0-alpha.0，无 settingsNamespace 旧 API）
+  'dsh-better-sidebar',
+]
+
 let applied = 0
 
 /** Apply one exact-text replacement; count successes, fail loudly on missing anchors. */
@@ -327,6 +337,118 @@ export function patchMarketGitResolve(runtimeRoot = RUNTIME_ROOT) {
   return null
 }
 
+/**
+ * Give ordinary users a clear message when a plugin needs a native (node-gyp)
+ * build, instead of the raw ELIFECYCLE/gyp stack the desktop cannot resolve.
+ *
+ * WHY: the packaged desktop ships no C++ toolchain (VS Build Tools), so a
+ * plugin whose install script runs `node-gyp rebuild` (e.g. anything depending
+ * on node-pty without a matching prebuild) always fails here. classifyPnpmFailure
+ * already translates many pnpm errors; this adds the node-gyp family so the UI
+ * says "this plugin needs a build toolchain, ordinary users cannot install it"
+ * rather than a wall of `gyp ERR!`.
+ */
+export function patchMarketNativeBuildGuidance(runtimeRoot = RUNTIME_ROOT) {
+  const compatPath = join(runtimeRoot, 'node_modules', 'dshmarket', 'lib', 'pnpm-compat.js')
+  if (!existsSync(compatPath)) {
+    console.warn(`[patch-native-build] runtime has no dshmarket pnpm-compat at ${compatPath}; skipping`)
+    return
+  }
+  if (hasMarker(compatPath, 'DESKTOP_NATIVE_BUILD_GUIDANCE')) {
+    console.log('  = market native-build guidance already patched')
+    return
+  }
+  const text = readFileSync(compatPath, 'utf8')
+  // Insert a branch before classifyPnpmFailure's trailing `return null`.
+  const anchor = '    return null;\n}'
+  const at = text.lastIndexOf(anchor)
+  if (at === -1) {
+    console.warn('  ! pnpm-compat classifyPnpmFailure tail not found (skipped)')
+    return
+  }
+  const branch = [
+    '    /* DESKTOP_NATIVE_BUILD_GUIDANCE (desktop): the packaged shell has no',
+    '       C++ toolchain, so node-gyp/prebuild failures cannot be fixed by the',
+    '       user — say so clearly instead of dumping gyp output. */',
+    '    if (/node-gyp|gyp ERR|node scripts\\/prebuild\\.js/i.test(output) && /ELIFECYCLE|Exit status 1|gyp ERR/i.test(output)) {',
+    '        return {',
+    '            code: "native-build-needed",',
+    '            recoverable: false,',
+    '            message: "\u8fd9\u4e2a\u63d2\u4ef6\u4f9d\u8d56\u9700\u8981\u7f16\u8bd1\u7684\u539f\u751f\u6a21\u5757\uff08node-gyp\uff09\u3002\u5f53\u524d\u684c\u9762\u7248\u6ca1\u6709\u5185\u7f6e\u7f16\u8bd1\u5de5\u5177\u94fe\uff08VS Build Tools\uff09\uff0c\u666e\u901a\u7528\u6237\u65e0\u6cd5\u5b89\u88c5\u6b64\u7c7b\u63d2\u4ef6\uff1b\u8bf7\u5b89\u88c5\u4f5c\u8005\u53d1\u5e03\u7684\u9884\u7f16\u8bd1\u7248\u672c\uff0c\u6216\u4f7f\u7528\u5b98\u65b9\u63a8\u8350\u63d2\u4ef6 / this plugin depends on native modules that must be compiled (node-gyp); the desktop build ships no C++ toolchain (VS Build Tools), so ordinary users cannot install it — use an officially recommended plugin or ask the author for a prebuilt release",',
+    '        };',
+    '    }',
+    '    return null;',
+    '}',
+  ].join('\n')
+  writeFileSync(compatPath, `${text.slice(0, at)}${branch}${text.slice(at + anchor.length)}`)
+  console.log('  + market: native-build (node-gyp) guidance for ordinary users')
+  return null
+}
+
+/**
+ * Mark the desktop's officially recommended plugins in the market catalog and
+ * sort them first in the discover list.
+ *
+ * WHY: ordinary users have no way to judge which community plugins are
+ * compatible with the desktop runtime (dsh-settings API drifts). A short
+ * verified list surfaced at the top gives them a safe "install this" default
+ * without touching install permissions for anything else.
+ */
+export function patchMarketRecommended(runtimeRoot = RUNTIME_ROOT) {
+  const registryPath = join(runtimeRoot, 'node_modules', 'dshmarket', 'lib', 'registry.js')
+  const clientPath = join(runtimeRoot, 'node_modules', 'dshmarket', 'client', 'client.js')
+  const list = DESKTOP_RECOMMENDED_PLUGINS.map((name) => JSON.stringify(name)).join(', ')
+  let did = false
+
+  // 1. registry.js: attach `recommended` to the catalog entries.
+  if (existsSync(registryPath)) {
+    if (hasMarker(registryPath, 'DESKTOP_RECOMMENDED_PLUGINS')) {
+      console.log('  = market recommended flag already patched')
+    } else {
+      const src = readFileSync(registryPath, 'utf8')
+      const mapAnchor = '        return { ...plugin, category };'
+      const constAnchor = 'function asRegistry(value) {'
+      if (src.indexOf(mapAnchor) !== -1 && src.indexOf(constAnchor) !== -1) {
+        const constDecl = `const DESKTOP_RECOMMENDED_PLUGINS = new Set([${list}]);\n`
+        const withConst = src.replace(
+          constAnchor,
+          `${constDecl}${constAnchor}`,
+        )
+        const replaced = withConst.replace(
+          mapAnchor,
+          '        return { ...plugin, category, recommended: DESKTOP_RECOMMENDED_PLUGINS.has(String(plugin.name ?? \'\')) };',
+        )
+        writeFileSync(registryPath, replaced)
+        console.log('  + market: recommended flag attached to catalog entries')
+        did = true
+      } else {
+        console.warn('  ! market registry anchors not found (skipped)')
+      }
+    }
+  }
+
+  // 2. client.js: sort recommended plugins first in comparePlugins.
+  if (existsSync(clientPath)) {
+    if (hasMarker(clientPath, 'DESKTOP_RECOMMENDED')) {
+      console.log('  = market recommended sort already patched')
+    } else {
+      const src = readFileSync(clientPath, 'utf8')
+      const fnAnchor = 'function comparePlugins(a, b, sort) {\n\t\t\tconst hasDownloads'
+      const at = src.indexOf(fnAnchor)
+      if (at !== -1) {
+        const insert = 'function comparePlugins(a, b, sort) {\n\t\t\t/* DESKTOP_RECOMMENDED: official picks first */\n\t\t\tif (a.recommended && !b.recommended) return -1;\n\t\t\tif (b.recommended && !a.recommended) return 1;\n\t\t\tconst hasDownloads'
+        writeFileSync(clientPath, src.replace(fnAnchor, insert))
+        console.log('  + market: recommended plugins sorted first in discover')
+        did = true
+      } else {
+        console.warn('  ! market client comparePlugins anchor not found (skipped)')
+      }
+    }
+  }
+
+  return did ? null : undefined
+}
+
 // Allow import as a module (from verify-packaged-runtime / release scripts) and
 // direct CLI execution.
 const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -336,6 +458,8 @@ if (isMain) {
     patchWorkerDesktopBridge()
     patchAutoPickerForceBrowse()
     patchMarketGitResolve()
+    patchMarketNativeBuildGuidance()
+    patchMarketRecommended()
   } catch (error) {
     console.error(`[patch-native-picker] FAILED: ${error instanceof Error ? error.message : String(error)}`)
     process.exit(1)
