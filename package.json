@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-desktop",
   "description": "DeepSeek Harness desktop application with tray-owned Host lifecycle",
-  "version": "0.1.0-rc.43",
+  "version": "0.1.0-rc.44",
   "private": true,
   "type": "module",
   "main": "lib/main.js",
@@ -22,7 +22,7 @@
     "publish:runtime": "node --import tsx scripts/publish-runtime.ts",
     "publish:gitee": "node --import tsx scripts/publish-gitee.ts",
     "release": "node --import tsx scripts/release.ts",
-    "dist:thin": "node --import tsx scripts/publish-runtime.ts --url https://gitee.com/yixiao-xiao/dsh-pc-release/releases/download/stable --write-config && pnpm run build:shell && electron-builder --win nsis",
+    "dist:thin": "node --import tsx scripts/publish-runtime.ts --url https://gitee.com/yixiao-xiao/dsh-pc-release/releases/download/stable --write-config && pnpm run build:shell && electron-builder --win nsis --publish never",
     "release:gitee": "pnpm run dist:thin && pnpm run publish:gitee",
     "sync:upstream": "node scripts/sync-upstream.mjs"
   },

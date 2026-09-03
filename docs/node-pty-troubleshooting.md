@@ -1,7 +1,7 @@
 # node-pty 插件安装失败排查记录（进行中）
 
-> 状态：**rc.43 已发布** — 本机验证 rc.42 时再触首启崩（Host 崩于 `dsh-session-turn-outline` 无 `lib/index.js`）。定位到真正根因：**runtime 打包依赖 workspace 构建完整性**（缺 lib 的 workspace 包 + vendor 包 package.json 误删）。rc.43：stage 管线加 `repairBrokenPackageEntries` 自愈校验 + workspace 完整重建，runtime 完整。
-> 更新时间：2026-09-02
+> 状态：**rc.44 已发布** — rc.43 因旧 lib 回灌导致首启崩（见 `docs/rc43-runtime-stale-lib-troubleshooting.md`，已由 rc.44 从干净 workspace 重建 runtime 解决）。rc.44 runtime `0.1.0-rc.44-bf9eec5ce294` 扫描 0 个旧符号。
+> 更新时间：2026-09-03
 
 ## 一、问题现象
 
